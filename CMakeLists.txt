@@ -11,3 +11,9 @@ find_package(SDL3_ttf REQUIRED CONFIG)
 # Third-party dependencies.
 add_subdirectory(3rd/clay)
 add_subdirectory(3rd/stb)
+
+# Logic: data processing, state, pure functions (unit-tested).
+add_subdirectory(src/core)
+
+enable_testing()
+add_subdirectory(test)
