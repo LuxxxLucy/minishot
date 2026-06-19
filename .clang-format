@@ -1,0 +1,9 @@
+BasedOnStyle: Google
+IndentWidth: 4
+BreakBeforeBraces: Linux
+PointerAlignment: Right
+DerivePointerAlignment: false
+ColumnLimit: 80
+InsertBraces: true
+SortIncludes: false
+Cpp11BracedListStyle: false

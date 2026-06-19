@@ -1,0 +1,4 @@
+build/
+# Downloaded assets and reference clones: never tracked, not even in history.
+assets/
+refs/
