@@ -15,5 +15,8 @@ add_subdirectory(3rd/stb)
 # Logic: data processing, state, pure functions (unit-tested).
 add_subdirectory(src/core)
 
+# Visual: UI modules and the app entry point.
+add_subdirectory(src/app)
+
 enable_testing()
 add_subdirectory(test)
