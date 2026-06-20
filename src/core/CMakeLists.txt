@@ -1,0 +1,5 @@
+add_subdirectory(geometry)
+add_subdirectory(naming)
+add_subdirectory(config)
+add_subdirectory(capture)
+add_subdirectory(hotkey)
