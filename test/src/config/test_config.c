@@ -4,7 +4,7 @@
 
 static void test_defaults(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     CHECK_STR(cfg.save_dir, "~/Downloads");
     CHECK_STR(cfg.hotkey, "cmd+shift+a");
     CHECK_STR(cfg.font_path, "");  // empty means use the app default
@@ -12,7 +12,7 @@ static void test_defaults(void)
 
 static void test_font_path(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     int rc = ms_config_parse(&cfg, "font_path=/Library/Fonts/My.ttf\n");
     CHECK_EQ(rc, 0);
     CHECK_STR(cfg.font_path, "/Library/Fonts/My.ttf");
@@ -21,14 +21,14 @@ static void test_font_path(void)
     char out[256];
     int n = ms_config_serialize(&cfg, out, sizeof(out));
     CHECK(n > 0);
-    ms_config fresh = ms_config_default();
+    struct ms_config fresh = ms_config_default();
     CHECK_EQ(ms_config_parse(&fresh, out), 0);
     CHECK_STR(fresh.font_path, "/Library/Fonts/My.ttf");
 }
 
 static void test_normal_parse(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     int rc = ms_config_parse(&cfg, "save_dir=/tmp/shots\nhotkey=cmd+1\n");
     CHECK_EQ(rc, 0);
     CHECK_STR(cfg.save_dir, "/tmp/shots");
@@ -37,7 +37,7 @@ static void test_normal_parse(void)
 
 static void test_missing_trailing_newline(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     int rc = ms_config_parse(&cfg, "save_dir=/a\nhotkey=cmd+2");
     CHECK_EQ(rc, 0);
     CHECK_STR(cfg.save_dir, "/a");
@@ -46,7 +46,7 @@ static void test_missing_trailing_newline(void)
 
 static void test_whitespace_trimming(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     int rc = ms_config_parse(
         &cfg, "  save_dir  =   /trim/me   \n\thotkey\t=\tcmd+x\t\n");
     CHECK_EQ(rc, 0);
@@ -56,7 +56,7 @@ static void test_whitespace_trimming(void)
 
 static void test_comment_and_blank_skipping(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     int rc = ms_config_parse(&cfg,
                              "\n"
                              "# a comment\n"
@@ -71,7 +71,7 @@ static void test_comment_and_blank_skipping(void)
 
 static void test_unknown_key_ignored(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     int rc = ms_config_parse(&cfg, "bogus=value\nsave_dir=/ok\n");
     CHECK_EQ(rc, 0);
     CHECK_STR(cfg.save_dir, "/ok");
@@ -80,7 +80,7 @@ static void test_unknown_key_ignored(void)
 
 static void test_malformed_line(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     int rc =
         ms_config_parse(&cfg, "save_dir=/ok\nno_equals_here\nhotkey=cmd+z\n");
     CHECK_EQ(rc, -1);
@@ -91,7 +91,7 @@ static void test_malformed_line(void)
 
 static void test_truncation(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     char line[64 + 1100];
     char big[1100];
     memset(big, 'x', sizeof(big) - 1);
@@ -105,7 +105,7 @@ static void test_truncation(void)
 
 static void test_serialize_exact(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     strcpy(cfg.save_dir, "/foo");
     strcpy(cfg.hotkey, "cmd+y");
     char out[256];
@@ -116,7 +116,7 @@ static void test_serialize_exact(void)
 
 static void test_serialize_buffer_too_small(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     char out[4];
     int n = ms_config_serialize(&cfg, out, sizeof(out));
     CHECK_EQ(n, -1);
@@ -124,14 +124,14 @@ static void test_serialize_buffer_too_small(void)
 
 static void test_round_trip(void)
 {
-    ms_config cfg = ms_config_default();
+    struct ms_config cfg = ms_config_default();
     strcpy(cfg.save_dir, "/some/where/deep");
     strcpy(cfg.hotkey, "ctrl+alt+q");
     char out[2048];
     int n = ms_config_serialize(&cfg, out, sizeof(out));
     CHECK(n > 0);
 
-    ms_config fresh = ms_config_default();
+    struct ms_config fresh = ms_config_default();
     int rc = ms_config_parse(&fresh, out);
     CHECK_EQ(rc, 0);
     CHECK_STR(fresh.save_dir, cfg.save_dir);

@@ -5,7 +5,7 @@
 int main(void)
 {
     // --- canonical example from the contract ---
-    ms_hotkey h = ms_hotkey_parse("cmd+shift+a");
+    struct ms_hotkey h = ms_hotkey_parse("cmd+shift+a");
     CHECK(h.ok);
     CHECK_EQ(h.mods, MINISHOT_MOD_CMD | MINISHOT_MOD_SHIFT);
     CHECK_EQ(h.key, 'a');

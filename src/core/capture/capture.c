@@ -7,15 +7,16 @@
 
 extern char **environ;
 
-int ms_capture_build_argv(char **argv, int max, char *buf, size_t bufn,
-                          ms_capture_mode mode, int x, int y, int w, int h,
-                          const char *path)
+#define MS_SCREENCAPTURE_BIN "/usr/sbin/screencapture"
+
+int ms_capture_build_argv(char **argv, int max, char *buf, size_t bufn, int x,
+                          int y, int w, int h, const char *path)
 {
     const int argc = 5;
     if (argc + 1 > max) {
         return -1;
     }
-    if (mode == MINISHOT_CAP_FILE && path == NULL) {
+    if (path == NULL) {
         return -1;
     }
 
@@ -24,28 +25,21 @@ int ms_capture_build_argv(char **argv, int max, char *buf, size_t bufn,
         return -1;
     }
 
-    argv[0] = "/usr/sbin/screencapture";
+    argv[0] = MS_SCREENCAPTURE_BIN;
     argv[1] = "-x";
-    if (mode == MINISHOT_CAP_FILE) {
-        argv[2] = "-R";
-        argv[3] = buf;
-        argv[4] = (char *)path;
-    } else {
-        argv[2] = "-c";
-        argv[3] = "-R";
-        argv[4] = buf;
-    }
+    argv[2] = "-R";
+    argv[3] = buf;
+    argv[4] = (char *)path;
     argv[5] = NULL;
     return argc;
 }
 
-int ms_capture_run(ms_capture_mode mode, int x, int y, int w, int h,
-                   const char *path)
+int ms_capture_run(int x, int y, int w, int h, const char *path)
 {
     char *argv[8];
     char buf[64];
-    if (ms_capture_build_argv(argv, 8, buf, sizeof(buf), mode, x, y, w, h,
-                              path) < 0) {
+    if (ms_capture_build_argv(argv, 8, buf, sizeof(buf), x, y, w, h, path) <
+        0) {
         return -1;
     }
 
@@ -53,8 +47,8 @@ int ms_capture_run(ms_capture_mode mode, int x, int y, int w, int h,
     // no user code between fork and exec, so it avoids the malloc-lock deadlock
     // that forking a multithreaded Cocoa/Metal process can hit.
     pid_t pid;
-    if (posix_spawn(&pid, "/usr/sbin/screencapture", NULL, NULL, argv,
-                    environ) != 0) {
+    if (posix_spawn(&pid, MS_SCREENCAPTURE_BIN, NULL, NULL, argv, environ) !=
+        0) {
         return -1;
     }
     int status;

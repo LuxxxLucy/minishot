@@ -7,56 +7,89 @@
 #include <time.h>
 
 #include "config.h"
+#include "geometry.h"
 #include "naming.h"
-#include "pinmodel.h"
 #include "render.h"
 #include "settings.h"
-#include "toast.h"
+#include "theme.h"
 
 // Layout (window points). A rounded card (image at top inside an animated
-// border ring, toolbar below) floats on a soft drop shadow. The window carries
+// border, toolbar below) floats on a soft drop shadow. The window carries
 // a transparent margin around the card to hold the shadow halo.
-#define MS_PIN_BORDER 3.0f
-#define MS_PIN_GAP 5.0f
-#define MS_PIN_MARGIN 22.0f
-#define MS_CARD_RADIUS 12.0f
-#define MS_PIN_RESIZE_EDGE 10.0f
-#define MS_PIN_TOAST_SECS 1.6
+#define MS_CARD_BORDER 3.0f
+#define MS_CARD_GAP 5.0f
+#define MS_CARD_MARGIN 22.0f
+#define MS_CARD_RADIUS 3.0f
+#define MS_CARD_RESIZE_EDGE 10.0f
+#define MS_CARD_MIN_PX 32.0f  // smallest allowed image dimension (points)
+#define MS_TOAST_SECS 1.6
 
 #define MS_TB_N 4
 #define MS_TB_BTN 22.0f  // square, icon-only
 #define MS_TB_ICON 14.0f
 #define MS_TB_GAP 3.0f
 #define MS_TB_PAD 4.0f
+#define MS_TB_RADIUS 10.0f  // toolbar pill corner radius
+#define MS_BTN_RADIUS 8.0f  // toolbar button corner radius
+
+// Drop shadow: one translucent rounded rect grown and offset down behind card.
+#define MS_SHADOW_SPREAD 1.6f
+#define MS_SHADOW_OFFSET_Y 4.0f
+
+// Toast pill metrics (points).
+#define MS_TOAST_RADIUS 6.0f
+#define MS_TOAST_PAD_X 10.0f
+#define MS_TOAST_PAD_Y 4.0f
+#define MS_TOAST_TOP 10.0f  // gap from the image top edge
 
 // Icon-pop animation (panim sinpulse: 0 -> 1 -> 0 over the duration).
-#define MS_HIT_DUR 0.28f
-#define MS_HIT_AMP 0.32f
+#define MS_POP_DUR 0.28f
+#define MS_POP_AMP 0.32f
+#define MS_PIN_BUMP 1.10f  // persistent icon scale while pinned
 
 #define MS_ZOOM_KEY 1.1f     // cmd +/- zoom step
 #define MS_ZOOM_WHEEL 1.08f  // mouse-wheel zoom step
 #define MS_TOAST_GRACE 0.1   // extra seconds to redraw once after a toast ends
 
 enum { MS_PIN = 0, MS_COPY = 1, MS_SAVE = 2, MS_DELETE = 3 };
-static const ms_icon_kind MS_TB_ICONK[MS_TB_N] = { MS_ICON_PIN, MS_ICON_COPY,
-                                                   MS_ICON_SAVE,
-                                                   MS_ICON_DELETE };
+static const enum ms_icon_kind MS_TB_ICONK[MS_TB_N] = {
+    MS_ICON_PIN, MS_ICON_COPY, MS_ICON_SAVE, MS_ICON_DELETE
+};
+
+// Transient toolbar message with an expiry; the clock is passed in.
+struct ms_toast {
+    char msg[256];
+    double until;
+    bool active;
+};
+
+static void ms_toast_show(struct ms_toast *t, const char *msg, double now,
+                          double dur)
+{
+    SDL_strlcpy(t->msg, msg, sizeof(t->msg));
+    t->until = now + dur;
+    t->active = true;
+}
+
+static bool ms_toast_visible(const struct ms_toast *t, double now)
+{
+    return t->active && now < t->until;
+}
 
 struct ms_view {
     SDL_Window *win;
     SDL_Renderer *ren;
     SDL_Texture *tex;             // captured image
     SDL_Texture *icons[MS_TB_N];  // white glyphs, tinted at draw
-    ms_pin pin;                   // image display size (points)
+    struct ms_size src_px;        // captured image size (pixels)
+    struct ms_size disp;          // image display size (points)
     float scale;                  // display pixel density, for crisp text
-    bool pinned;                  // Pin button -> always-on-top + glowing ring
+    bool pinned;  // Pin button -> always-on-top + glowing border
     char png_path[1024];
-    ms_toast toast;          // transient toolbar message timer
-    SDL_Texture *toast_tex;  // cached render of toast_tex_msg
-    char toast_tex_msg[256];
-    int toast_tw, toast_th;
+    struct ms_toast toast;              // transient toolbar message timer
+    struct ms_label_cache toast_label;  // cached render of the toast text
     // Animation: per-button pop clock (<0 = idle), hovered button index.
-    float hit_t[MS_TB_N];
+    float pop_t[MS_TB_N];
     int hover_btn;
     // Deferred-work flags set from the event watch (may be off-thread);
     // consumed on the main thread by ms_view_process.
@@ -67,7 +100,7 @@ struct ms_view {
     struct ms_view *next;
 };
 
-static ms_view *g_pins = NULL;
+static struct ms_view *g_views = NULL;
 static bool g_watch_installed = false;
 static Uint32 g_process_event = 0;
 
@@ -79,60 +112,60 @@ static float ms_tb_w(void)
 }
 static float ms_tb_h(void) { return MS_TB_BTN + 2 * MS_TB_PAD; }
 
-static float ms_content_w(const ms_view *pw)
+static float ms_content_w(const struct ms_view *v)
 {
-    float iw = pw->pin.w + 2 * MS_PIN_BORDER;
+    float iw = v->disp.w + 2 * MS_CARD_BORDER;
     float tw = ms_tb_w();
     return iw > tw ? iw : tw;
 }
-static float ms_content_h(const ms_view *pw)
+static float ms_content_h(const struct ms_view *v)
 {
-    return MS_PIN_BORDER + pw->pin.h + MS_PIN_GAP + ms_tb_h();
+    return MS_CARD_BORDER + v->disp.h + MS_CARD_GAP + ms_tb_h();
 }
-static float ms_win_w(const ms_view *pw)
+static float ms_win_w(const struct ms_view *v)
 {
-    return ms_content_w(pw) + 2 * MS_PIN_MARGIN;
+    return ms_content_w(v) + 2 * MS_CARD_MARGIN;
 }
-static float ms_win_h(const ms_view *pw)
+static float ms_win_h(const struct ms_view *v)
 {
-    return ms_content_h(pw) + 2 * MS_PIN_MARGIN;
+    return ms_content_h(v) + 2 * MS_CARD_MARGIN;
 }
 
-static SDL_FRect ms_card_rect(const ms_view *pw)
+static SDL_FRect ms_card_rect(const struct ms_view *v)
 {
-    return (SDL_FRect){ MS_PIN_MARGIN, MS_PIN_MARGIN, ms_content_w(pw),
-                        ms_content_h(pw) };
+    return (SDL_FRect){ MS_CARD_MARGIN, MS_CARD_MARGIN, ms_content_w(v),
+                        ms_content_h(v) };
 }
-static SDL_FRect ms_image_rect(const ms_view *pw)
+static SDL_FRect ms_image_rect(const struct ms_view *v)
 {
-    SDL_FRect c = ms_card_rect(pw);
-    return (SDL_FRect){ c.x + (c.w - pw->pin.w) * 0.5f, c.y + MS_PIN_BORDER,
-                        pw->pin.w, pw->pin.h };
+    SDL_FRect c = ms_card_rect(v);
+    return (SDL_FRect){ c.x + (c.w - v->disp.w) * 0.5f, c.y + MS_CARD_BORDER,
+                        v->disp.w, v->disp.h };
 }
-static SDL_FRect ms_toolbar_rect(const ms_view *pw)
+static SDL_FRect ms_toolbar_rect(const struct ms_view *v)
 {
-    SDL_FRect img = ms_image_rect(pw);
+    SDL_FRect img = ms_image_rect(v);
     float tw = ms_tb_w();
     // Right-aligned under the image.
-    return (SDL_FRect){ img.x + img.w - tw, img.y + img.h + MS_PIN_GAP, tw,
+    return (SDL_FRect){ img.x + img.w - tw, img.y + img.h + MS_CARD_GAP, tw,
                         ms_tb_h() };
 }
-static SDL_FRect ms_button_rect(const ms_view *pw, int i)
+static SDL_FRect ms_button_rect(const struct ms_view *v, int i)
 {
-    SDL_FRect tb = ms_toolbar_rect(pw);
+    SDL_FRect tb = ms_toolbar_rect(v);
     return (SDL_FRect){ tb.x + MS_TB_PAD + (float)i * (MS_TB_BTN + MS_TB_GAP),
                         tb.y + MS_TB_PAD, MS_TB_BTN, MS_TB_BTN };
 }
 
-static void ms_view_show_toast(ms_view *pw, const char *msg)
+static void ms_view_show_toast(struct ms_view *v, const char *msg)
 {
-    ms_toast_show(&pw->toast, msg, ms_now(), MS_PIN_TOAST_SECS);
+    ms_toast_show(&v->toast, msg, ms_now(), MS_TOAST_SECS);
 }
 
-static int ms_button_at(const ms_view *pw, float px, float py)
+static int ms_button_at(const struct ms_view *v, float px, float py)
 {
     for (int i = 0; i < MS_TB_N; i++) {
-        SDL_FRect b = ms_button_rect(pw, i);
+        SDL_FRect b = ms_button_rect(v, i);
         if (px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h) {
             return i;
         }
@@ -146,10 +179,10 @@ static SDL_HitTestResult SDLCALL ms_view_hit_test(SDL_Window *win,
                                                   void *data)
 {
     (void)win;
-    ms_view *pw = (ms_view *)data;
+    struct ms_view *v = (struct ms_view *)data;
     float px = (float)area->x, py = (float)area->y;
-    SDL_FRect c = ms_card_rect(pw);
-    float e = MS_PIN_RESIZE_EDGE;
+    SDL_FRect c = ms_card_rect(v);
+    float e = MS_CARD_RESIZE_EDGE;
 
     // Resize bands sit on the card edges, not the transparent margin.
     bool left = SDL_fabsf(px - c.x) <= e;
@@ -183,38 +216,27 @@ static SDL_HitTestResult SDLCALL ms_view_hit_test(SDL_Window *win,
         return SDL_HITTEST_RESIZE_BOTTOM;
     }
 
-    if (ms_button_at(pw, px, py) >= 0) {
+    if (ms_button_at(v, px, py) >= 0) {
         return SDL_HITTEST_NORMAL;
     }
     return SDL_HITTEST_DRAGGABLE;
 }
 
-// Animated illuminated ring around the image: flowing rainbow when pinned, a
+// Animated border around the image: flowing rainbow when pinned, a
 // mono shimmer on hover, a faint static hairline otherwise.
-static void ms_draw_border(ms_view *pw, SDL_FRect img, float tsec)
+static void ms_draw_border(struct ms_view *v, SDL_FRect img, float tsec)
 {
-    float B = MS_PIN_BORDER;
-    SDL_FPoint O[4] = { { img.x - B, img.y - B },
-                        { img.x + img.w + B, img.y - B },
-                        { img.x + img.w + B, img.y + img.h + B },
-                        { img.x - B, img.y + img.h + B } };
-    SDL_FPoint I[4] = { { img.x, img.y },
-                        { img.x + img.w, img.y },
-                        { img.x + img.w, img.y + img.h },
-                        { img.x, img.y + img.h } };
-    bool hover = pw->hover_btn >= 0;
+    if (v->pinned) {
+        ms_draw_rainbow_border(v->ren, img, MS_CARD_BORDER, tsec);
+        return;
+    }
+    SDL_FPoint O[4], I[4];
+    ms_border_corners(img, MS_CARD_BORDER, O, I);
+    bool hover = v->hover_btn >= 0;
     for (int e = 0; e < 4; e++) {
         int a = e, b = (e + 1) % 4;
         SDL_FColor ca, cb;
-        if (pw->pinned) {
-            Uint8 r1, g1, b1, r2, g2, b2;
-            ms_hsv_rgb((float)a / 4.0f + tsec * 0.15f, 0.85f, 1.0f, &r1, &g1,
-                       &b1);
-            ms_hsv_rgb((float)b / 4.0f + tsec * 0.15f, 0.85f, 1.0f, &r2, &g2,
-                       &b2);
-            ca = (SDL_FColor){ r1 / 255.0f, g1 / 255.0f, b1 / 255.0f, 1.0f };
-            cb = (SDL_FColor){ r2 / 255.0f, g2 / 255.0f, b2 / 255.0f, 1.0f };
-        } else if (hover) {
+        if (hover) {
             float va =
                 0.55f +
                 0.45f * 0.5f * (1.0f + sinf((float)a * 1.57f - tsec * 3.0f));
@@ -226,152 +248,138 @@ static void ms_draw_border(ms_view *pw, SDL_FRect img, float tsec)
         } else {
             ca = cb = (SDL_FColor){ 1.0f, 1.0f, 1.0f, 0.18f };
         }
-        ms_fill_quad(pw->ren, O[a], O[b], I[b], I[a], ca, cb, cb, ca);
+        ms_fill_quad(v->ren, O[a], O[b], I[b], I[a], ca, cb, cb, ca);
     }
 }
 
-static void ms_draw_button(ms_view *pw, int i)
+static void ms_draw_button(struct ms_view *v, int i)
 {
-    SDL_FRect b = ms_button_rect(pw, i);
-    bool hover = pw->hover_btn == i;
-    bool on = (i == MS_PIN && pw->pinned);
+    SDL_FRect b = ms_button_rect(v, i);
+    bool hover = v->hover_btn == i;
+    bool on = (i == MS_PIN && v->pinned);
 
     // Background tint: bare when idle, subtle overlay on hover, accent for the
     // active Pin state.
     Clay_Color bg;
     if (on) {
-        bg = (Clay_Color){ 10, 132, 255, 70 };
+        bg = MS_COL_BTN_ON;
     } else if (hover) {
-        bg = (Clay_Color){ 255, 255, 255, 24 };
+        bg = MS_COL_BTN_HOVER;
     } else {
-        bg = (Clay_Color){ 255, 255, 255, 10 };
+        bg = MS_COL_BTN_IDLE;
     }
-    ms_draw_rounded_rect(pw->ren, b, 8.0f, bg);
+    ms_draw_rounded_rect(v->ren, b, MS_BTN_RADIUS, bg);
 
     // Icon, scaled by the pop (and a small persistent bump when Pin is on).
-    float pop = pw->hit_t[i] >= 0.0f
-                    ? 1.0f + MS_HIT_AMP * ms_sinpulse(pw->hit_t[i] / MS_HIT_DUR)
+    float pop = v->pop_t[i] >= 0.0f
+                    ? 1.0f + MS_POP_AMP * ms_sinpulse(v->pop_t[i] / MS_POP_DUR)
                     : 1.0f;
-    float base = on ? 1.10f : 1.0f;
+    float base = on ? MS_PIN_BUMP : 1.0f;
     float s = MS_TB_ICON * base * pop;
 
-    Uint8 tr = 238, tg = 238, tb = 245;  // fg.icon
+    Clay_Color tint = MS_COL_ICON;
     if (i == MS_DELETE) {
-        tr = 255;
-        tg = 80;
-        tb = 80;
+        tint = MS_COL_ICON_DELETE;
     }
     if (on) {
-        tr = 90;
-        tg = 180;
-        tb = 255;
+        tint = MS_COL_ICON_ON;
     }
 
-    if (pw->icons[i]) {
-        SDL_SetTextureColorMod(pw->icons[i], tr, tg, tb);
+    if (v->icons[i]) {
+        SDL_SetTextureColorMod(v->icons[i], (Uint8)tint.r, (Uint8)tint.g,
+                               (Uint8)tint.b);
         SDL_FRect dst = { b.x + (b.w - s) * 0.5f, b.y + (b.h - s) * 0.5f, s,
                           s };
-        SDL_RenderTexture(pw->ren, pw->icons[i], NULL, &dst);
+        SDL_RenderTexture(v->ren, v->icons[i], NULL, &dst);
     }
 }
 
-static void ms_view_draw(ms_view *pw)
+static void ms_view_draw(struct ms_view *v)
 {
     double now = ms_now();
     float tsec = (float)now;
-    SDL_SetRenderDrawBlendMode(pw->ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawBlendMode(v->ren, SDL_BLENDMODE_BLEND);
 
     // Transparent window; the card floats on a soft shadow.
-    SDL_SetRenderDrawColor(pw->ren, 0, 0, 0, 0);
-    SDL_RenderClear(pw->ren);
+    SDL_SetRenderDrawColor(v->ren, 0, 0, 0, 0);
+    SDL_RenderClear(v->ren);
 
-    SDL_FRect card = ms_card_rect(pw);
-    // Layered translucent rounded rects, offset down, form a soft drop shadow.
-    for (int k = 9; k >= 1; k--) {
-        float sp = (float)k * 1.6f;
-        SDL_FRect sr = { card.x - sp, card.y - sp + 5.0f, card.w + 2 * sp,
-                         card.h + 2 * sp };
-        ms_draw_rounded_rect(pw->ren, sr, MS_CARD_RADIUS + sp,
-                             (Clay_Color){ 0, 0, 0, 7 });
-    }
-    ms_draw_rounded_rect(pw->ren, card, MS_CARD_RADIUS,
-                         (Clay_Color){ 28, 28, 32, 255 });
+    SDL_FRect card = ms_card_rect(v);
+    // A translucent rounded rect, grown and offset down behind the card, forms
+    // a soft drop shadow.
+    SDL_FRect sr = { card.x - MS_SHADOW_SPREAD,
+                     card.y - MS_SHADOW_SPREAD + MS_SHADOW_OFFSET_Y,
+                     card.w + 2 * MS_SHADOW_SPREAD,
+                     card.h + 2 * MS_SHADOW_SPREAD };
+    ms_draw_rounded_rect(v->ren, sr, MS_CARD_RADIUS + MS_SHADOW_SPREAD,
+                         MS_COL_SHADOW);
+    ms_draw_rounded_rect(v->ren, card, MS_CARD_RADIUS, MS_COL_CARD);
 
-    SDL_FRect img = ms_image_rect(pw);
-    ms_draw_border(pw, img, tsec);
-    if (pw->tex) {
-        SDL_RenderTexture(pw->ren, pw->tex, NULL, &img);
+    SDL_FRect img = ms_image_rect(v);
+    ms_draw_border(v, img, tsec);
+    if (v->tex) {
+        SDL_RenderTexture(v->ren, v->tex, NULL, &img);
     }
 
     // Toolbar strip background (rounded pill) below the image.
-    SDL_FRect tb = ms_toolbar_rect(pw);
-    ms_draw_rounded_rect(pw->ren, tb, 10.0f, (Clay_Color){ 22, 22, 26, 235 });
+    SDL_FRect tb = ms_toolbar_rect(v);
+    ms_draw_rounded_rect(v->ren, tb, MS_TB_RADIUS, MS_COL_TOOLBAR);
     for (int i = 0; i < MS_TB_N; i++) {
-        ms_draw_button(pw, i);
+        ms_draw_button(v, i);
     }
 
     // Toast: centered pill near the top of the image. The text is rendered once
     // per message and cached, not rebuilt every frame.
-    if (ms_toast_visible(&pw->toast, now)) {
-        if (!pw->toast_tex ||
-            SDL_strcmp(pw->toast_tex_msg, pw->toast.msg) != 0) {
-            if (pw->toast_tex) {
-                SDL_DestroyTexture(pw->toast_tex);
-            }
-            SDL_Color fg = { 255, 255, 255, 255 };
-            // Rasterize at device resolution so the text stays crisp under the
-            // window's 2x logical presentation.
-            pw->toast_tex =
-                ms_render_text_sized(pw->ren, pw->toast.msg, 13.0f * pw->scale,
-                                     fg, &pw->toast_tw, &pw->toast_th);
-            SDL_strlcpy(pw->toast_tex_msg, pw->toast.msg,
-                        sizeof(pw->toast_tex_msg));
+    if (ms_toast_visible(&v->toast, now)) {
+        // Rasterize at device resolution so the text stays crisp under the
+        // window's 2x logical presentation.
+        SDL_Texture *lt = ms_label_cache_get(
+            v->ren, &v->toast_label, v->toast.msg, MS_LABEL_FONT_PT * v->scale);
+        if (lt) {
+            float tw = v->toast_label.w / v->scale,
+                  th = v->toast_label.h / v->scale;
+            SDL_FRect pill = { img.x + (img.w - tw) * 0.5f - MS_TOAST_PAD_X,
+                               img.y + MS_TOAST_TOP, tw + 2 * MS_TOAST_PAD_X,
+                               th + 2 * MS_TOAST_PAD_Y };
+            ms_draw_rounded_rect(v->ren, pill, MS_TOAST_RADIUS, MS_COL_PILL);
+            SDL_FRect dst = { pill.x + MS_TOAST_PAD_X, pill.y + MS_TOAST_PAD_Y,
+                              tw, th };
+            SDL_RenderTexture(v->ren, lt, NULL, &dst);
         }
-        if (pw->toast_tex) {
-            float tw = pw->toast_tw / pw->scale, th = pw->toast_th / pw->scale;
-            SDL_FRect pill = { img.x + (img.w - tw) * 0.5f - 10.0f,
-                               img.y + 10.0f, tw + 20.0f, th + 8.0f };
-            ms_draw_rounded_rect(pw->ren, pill, 6.0f,
-                                 (Clay_Color){ 28, 28, 32, 224 });
-            SDL_FRect dst = { pill.x + 10.0f, pill.y + 4.0f, tw, th };
-            SDL_RenderTexture(pw->ren, pw->toast_tex, NULL, &dst);
-        }
-    } else if (pw->toast.active) {
-        pw->toast.active = 0;
-        if (pw->toast_tex) {
-            SDL_DestroyTexture(pw->toast_tex);
-            pw->toast_tex = NULL;
-            pw->toast_tex_msg[0] = '\0';
-        }
+    } else if (v->toast.active) {
+        v->toast.active = false;
+        ms_label_cache_free(&v->toast_label);
     }
 
-    SDL_RenderPresent(pw->ren);
+    SDL_RenderPresent(v->ren);
 }
 
-static void ms_view_apply_size(ms_view *pw, float target_w, float target_h)
+static void ms_view_apply_size(struct ms_view *v, float target_w,
+                               float target_h)
 {
-    float img_w = target_w - 2 * MS_PIN_MARGIN - 2 * MS_PIN_BORDER;
-    float img_h =
-        target_h - 2 * MS_PIN_MARGIN - MS_PIN_BORDER - MS_PIN_GAP - ms_tb_h();
-    ms_pin_resize(&pw->pin, img_w, img_h);
-    int ww = (int)ms_win_w(pw), wh = (int)ms_win_h(pw);
-    SDL_SetWindowSize(pw->win, ww, wh);
-    SDL_SetRenderLogicalPresentation(pw->ren, ww, wh,
+    float img_w = target_w - 2 * MS_CARD_MARGIN - 2 * MS_CARD_BORDER;
+    float img_h = target_h - 2 * MS_CARD_MARGIN - MS_CARD_BORDER - MS_CARD_GAP -
+                  ms_tb_h();
+    v->disp = ms_aspect_contain_min(v->src_px.w, v->src_px.h, img_w, img_h,
+                                    MS_CARD_MIN_PX);
+    int ww = (int)ms_win_w(v), wh = (int)ms_win_h(v);
+    SDL_SetWindowSize(v->win, ww, wh);
+    SDL_SetRenderLogicalPresentation(v->ren, ww, wh,
                                      SDL_LOGICAL_PRESENTATION_LETTERBOX);
 }
 
 // Scale the image by `factor` via the deferred-resize path (thread-safe).
-static void ms_view_request_zoom(ms_view *pw, float factor)
+static void ms_view_request_zoom(struct ms_view *v, float factor)
 {
-    pw->resize_w = ms_win_w(pw) * factor;
-    pw->resize_h = ms_win_h(pw) * factor;
-    pw->pending_resize = true;
-    pw->needs_redraw = true;
+    v->resize_w = ms_win_w(v) * factor;
+    v->resize_h = ms_win_h(v) * factor;
+    v->pending_resize = true;
+    v->needs_redraw = true;
 }
 
-static void ms_view_do_save(ms_view *pw)
+static void ms_view_do_save(struct ms_view *v)
 {
-    ms_config cfg;
+    struct ms_config cfg;
     ms_config_load(&cfg);
 
     const char *home = SDL_getenv("HOME");
@@ -392,27 +400,27 @@ static void ms_view_do_save(ms_view *pw)
     char name[128];
     if (ms_build_filename(name, sizeof(name), lt.tm_year + 1900, lt.tm_mon + 1,
                           lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec) < 0) {
-        ms_view_show_toast(pw, "Save failed");
+        ms_view_show_toast(v, "Save failed");
         return;
     }
     char dest[1280];
     if (ms_join_path(dest, sizeof(dest), dir, name) < 0) {
-        ms_view_show_toast(pw, "Save failed");
+        ms_view_show_toast(v, "Save failed");
         return;
     }
     SDL_CreateDirectory(dir);
     size_t sz = 0;
-    void *bytes = SDL_LoadFile(pw->png_path, &sz);
+    void *bytes = SDL_LoadFile(v->png_path, &sz);
     bool ok = bytes && SDL_SaveFile(dest, bytes, sz);
     if (bytes) {
         SDL_free(bytes);
     }
-    ms_view_show_toast(pw, ok ? "Saved" : "Save failed");
+    ms_view_show_toast(v, ok ? "Saved" : "Save failed");
 }
 
-static ms_view *ms_view_from_id(SDL_WindowID id)
+static struct ms_view *ms_view_from_id(SDL_WindowID id)
 {
-    for (ms_view *p = g_pins; p; p = p->next) {
+    for (struct ms_view *p = g_views; p; p = p->next) {
         if (p->win && SDL_GetWindowID(p->win) == id) {
             return p;
         }
@@ -420,28 +428,28 @@ static ms_view *ms_view_from_id(SDL_WindowID id)
     return NULL;
 }
 
-static void ms_view_handle_click(ms_view *pw, float px, float py)
+static void ms_view_handle_click(struct ms_view *v, float px, float py)
 {
-    int btn = ms_button_at(pw, px, py);
+    int btn = ms_button_at(v, px, py);
     switch (btn) {
         case MS_PIN:
-            pw->pinned = !pw->pinned;
-            SDL_SetWindowAlwaysOnTop(pw->win, pw->pinned);
-            pw->hit_t[MS_PIN] = 0.0f;
-            ms_view_show_toast(pw, pw->pinned ? "Pinned on top" : "Unpinned");
+            v->pinned = !v->pinned;
+            SDL_SetWindowAlwaysOnTop(v->win, v->pinned);
+            v->pop_t[MS_PIN] = 0.0f;
+            ms_view_show_toast(v, v->pinned ? "Pinned on top" : "Unpinned");
             break;
         case MS_COPY:
-            pw->hit_t[MS_COPY] = 0.0f;
-            ms_view_show_toast(pw, ms_clipboard_put_png(pw->png_path) == 0
-                                       ? "Copied"
-                                       : "Copy failed");
+            v->pop_t[MS_COPY] = 0.0f;
+            ms_view_show_toast(v, ms_clipboard_put_png(v->png_path) == 0
+                                      ? "Copied"
+                                      : "Copy failed");
             break;
         case MS_SAVE:
-            pw->hit_t[MS_SAVE] = 0.0f;
-            ms_view_do_save(pw);
+            v->pop_t[MS_SAVE] = 0.0f;
+            ms_view_do_save(v);
             break;
         case MS_DELETE:
-            pw->pending_destroy = true;
+            v->pending_destroy = true;
             break;
         default:
             break;
@@ -450,21 +458,21 @@ static void ms_view_handle_click(ms_view *pw, float px, float py)
 
 static void ms_view_process(SDL_WindowID id)
 {
-    ms_view *pw = ms_view_from_id(id);
-    if (!pw) {
+    struct ms_view *v = ms_view_from_id(id);
+    if (!v) {
         return;
     }
-    if (pw->pending_destroy) {
-        ms_view_destroy(pw);
+    if (v->pending_destroy) {
+        ms_view_destroy(v);
         return;
     }
-    if (pw->pending_resize) {
-        pw->pending_resize = false;
-        ms_view_apply_size(pw, pw->resize_w, pw->resize_h);
+    if (v->pending_resize) {
+        v->pending_resize = false;
+        ms_view_apply_size(v, v->resize_w, v->resize_h);
     }
-    if (pw->needs_redraw) {
-        pw->needs_redraw = false;
-        ms_view_draw(pw);
+    if (v->needs_redraw) {
+        v->needs_redraw = false;
+        ms_view_draw(v);
     }
 }
 
@@ -490,41 +498,41 @@ static bool SDLCALL ms_view_event_watch(void *userdata, SDL_Event *ev)
     }
     switch (ev->type) {
         case SDL_EVENT_WINDOW_RESIZED: {
-            ms_view *pw = ms_view_from_id(ev->window.windowID);
-            if (pw) {
-                pw->resize_w = (float)ev->window.data1;
-                pw->resize_h = (float)ev->window.data2;
-                pw->pending_resize = true;
-                pw->needs_redraw = true;
+            struct ms_view *v = ms_view_from_id(ev->window.windowID);
+            if (v) {
+                v->resize_w = (float)ev->window.data1;
+                v->resize_h = (float)ev->window.data2;
+                v->pending_resize = true;
+                v->needs_redraw = true;
                 ms_view_schedule(ev->window.windowID);
             }
             break;
         }
         case SDL_EVENT_WINDOW_EXPOSED: {
-            ms_view *pw = ms_view_from_id(ev->window.windowID);
-            if (pw) {
-                pw->needs_redraw = true;
+            struct ms_view *v = ms_view_from_id(ev->window.windowID);
+            if (v) {
+                v->needs_redraw = true;
                 ms_view_schedule(ev->window.windowID);
             }
             break;
         }
         case SDL_EVENT_MOUSE_MOTION: {
-            ms_view *pw = ms_view_from_id(ev->motion.windowID);
-            if (pw) {
-                int hb = ms_button_at(pw, ev->motion.x, ev->motion.y);
-                if (hb != pw->hover_btn) {
-                    pw->hover_btn = hb;
-                    pw->needs_redraw = true;
+            struct ms_view *v = ms_view_from_id(ev->motion.windowID);
+            if (v) {
+                int hb = ms_button_at(v, ev->motion.x, ev->motion.y);
+                if (hb != v->hover_btn) {
+                    v->hover_btn = hb;
+                    v->needs_redraw = true;
                     ms_view_schedule(ev->motion.windowID);
                 }
             }
             break;
         }
         case SDL_EVENT_WINDOW_MOUSE_LEAVE: {
-            ms_view *pw = ms_view_from_id(ev->window.windowID);
-            if (pw && pw->hover_btn != -1) {
-                pw->hover_btn = -1;
-                pw->needs_redraw = true;
+            struct ms_view *v = ms_view_from_id(ev->window.windowID);
+            if (v && v->hover_btn != -1) {
+                v->hover_btn = -1;
+                v->needs_redraw = true;
                 ms_view_schedule(ev->window.windowID);
             }
             break;
@@ -533,38 +541,38 @@ static bool SDLCALL ms_view_event_watch(void *userdata, SDL_Event *ev)
             if (ev->button.button != SDL_BUTTON_LEFT) {
                 break;
             }
-            ms_view *pw = ms_view_from_id(ev->button.windowID);
-            if (pw) {
-                ms_view_handle_click(pw, ev->button.x, ev->button.y);
-                if (!pw->pending_destroy) {
-                    pw->needs_redraw = true;
+            struct ms_view *v = ms_view_from_id(ev->button.windowID);
+            if (v) {
+                ms_view_handle_click(v, ev->button.x, ev->button.y);
+                if (!v->pending_destroy) {
+                    v->needs_redraw = true;
                 }
                 ms_view_schedule(ev->button.windowID);
             }
             break;
         }
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED: {
-            ms_view *pw = ms_view_from_id(ev->window.windowID);
-            if (pw) {
-                pw->pending_destroy = true;
+            struct ms_view *v = ms_view_from_id(ev->window.windowID);
+            if (v) {
+                v->pending_destroy = true;
                 ms_view_schedule(ev->window.windowID);
             }
             break;
         }
         case SDL_EVENT_KEY_DOWN: {
-            ms_view *pw = ms_view_from_id(ev->key.windowID);
-            if (!pw) {
+            struct ms_view *v = ms_view_from_id(ev->key.windowID);
+            if (!v) {
                 break;
             }
             if (ev->key.key == SDLK_ESCAPE) {
-                pw->pending_destroy = true;
+                v->pending_destroy = true;
                 ms_view_schedule(ev->key.windowID);
             } else if (ev->key.mod & SDL_KMOD_GUI) {  // cmd +/- zoom
                 if (ev->key.key == SDLK_EQUALS || ev->key.key == SDLK_KP_PLUS) {
-                    ms_view_request_zoom(pw, MS_ZOOM_KEY);
+                    ms_view_request_zoom(v, MS_ZOOM_KEY);
                 } else if (ev->key.key == SDLK_MINUS ||
                            ev->key.key == SDLK_KP_MINUS) {
-                    ms_view_request_zoom(pw, 1.0f / MS_ZOOM_KEY);
+                    ms_view_request_zoom(v, 1.0f / MS_ZOOM_KEY);
                 } else {
                     break;
                 }
@@ -573,10 +581,10 @@ static bool SDLCALL ms_view_event_watch(void *userdata, SDL_Event *ev)
             break;
         }
         case SDL_EVENT_MOUSE_WHEEL: {
-            ms_view *pw = ms_view_from_id(ev->wheel.windowID);
-            if (pw && ev->wheel.y != 0.0f) {
+            struct ms_view *v = ms_view_from_id(ev->wheel.windowID);
+            if (v && ev->wheel.y != 0.0f) {
                 ms_view_request_zoom(
-                    pw, ev->wheel.y > 0 ? MS_ZOOM_WHEEL : 1.0f / MS_ZOOM_WHEEL);
+                    v, ev->wheel.y > 0 ? MS_ZOOM_WHEEL : 1.0f / MS_ZOOM_WHEEL);
                 ms_view_schedule(ev->wheel.windowID);
             }
             break;
@@ -587,20 +595,20 @@ static bool SDLCALL ms_view_event_watch(void *userdata, SDL_Event *ev)
     return true;
 }
 
-ms_view *ms_view_create(const char *png_path, int x, int y)
+struct ms_view *ms_view_create(const char *png_path, int x, int y)
 {
     if (!png_path) {
         return NULL;
     }
 
-    ms_view *pw = (ms_view *)SDL_calloc(1, sizeof(*pw));
-    if (!pw) {
+    struct ms_view *v = (struct ms_view *)SDL_calloc(1, sizeof(*v));
+    if (!v) {
         return NULL;
     }
-    SDL_strlcpy(pw->png_path, png_path, sizeof(pw->png_path));
-    pw->hover_btn = -1;
+    SDL_strlcpy(v->png_path, png_path, sizeof(v->png_path));
+    v->hover_btn = -1;
     for (int i = 0; i < MS_TB_N; i++) {
-        pw->hit_t[i] = -1.0f;
+        v->pop_t[i] = -1.0f;
     }
 
     // Borderless, resizable, draggable from creation; NOT always-on-top until
@@ -608,50 +616,51 @@ ms_view *ms_view_create(const char *png_path, int x, int y)
     SDL_WindowFlags flags = SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE |
                             SDL_WINDOW_UTILITY | SDL_WINDOW_TRANSPARENT |
                             SDL_WINDOW_HIGH_PIXEL_DENSITY;
-    pw->win = SDL_CreateWindow("MiniShot Pin", 200, 200, flags);
+    v->win = SDL_CreateWindow("MiniShot Pin", 200, 200, flags);
     // Place so the image (inset by margin + border) overlays the captured
     // region.
-    if (pw->win) {
-        int off = (int)(MS_PIN_MARGIN + MS_PIN_BORDER);
-        SDL_SetWindowPosition(pw->win, x - off, y - off);
+    if (v->win) {
+        int off = (int)(MS_CARD_MARGIN + MS_CARD_BORDER);
+        SDL_SetWindowPosition(v->win, x - off, y - off);
     }
-    pw->ren = pw->win ? SDL_CreateRenderer(pw->win, NULL) : NULL;
-    if (!pw->win || !pw->ren) {
+    v->ren = v->win ? SDL_CreateRenderer(v->win, NULL) : NULL;
+    if (!v->win || !v->ren) {
         SDL_Log("view: window/renderer failed: %s", SDL_GetError());
-        ms_view_destroy(pw);
+        ms_view_destroy(v);
         return NULL;
     }
 
     int iw = 0, ih = 0;
-    if (ms_image_load_texture(pw->ren, png_path, &pw->tex, &iw, &ih) != 0) {
+    if (ms_image_load_texture(v->ren, png_path, &v->tex, &iw, &ih) != 0) {
         SDL_Log("view: image load failed: %s", png_path);
-        ms_view_destroy(pw);
+        ms_view_destroy(v);
         return NULL;
     }
-    SDL_SetTextureScaleMode(pw->tex, SDL_SCALEMODE_LINEAR);
-    SDL_SetTextureBlendMode(pw->tex, SDL_BLENDMODE_NONE);
+    SDL_SetTextureScaleMode(v->tex, SDL_SCALEMODE_LINEAR);
+    SDL_SetTextureBlendMode(v->tex, SDL_BLENDMODE_NONE);
 
     for (int i = 0; i < MS_TB_N; i++) {
-        pw->icons[i] = ms_icon_make(pw->ren, MS_TB_ICONK[i], (int)MS_TB_ICON);
+        v->icons[i] = ms_icon_make(v->ren, MS_TB_ICONK[i], (int)MS_TB_ICON);
     }
 
-    float scale = SDL_GetWindowDisplayScale(pw->win);
+    float scale = SDL_GetWindowDisplayScale(v->win);
     if (scale <= 0.0f) {
         scale = 1.0f;
     }
-    pw->scale = scale;
-    pw->pin = ms_pin_create((float)iw, (float)ih, scale, 0.0f, 0.0f);
+    v->scale = scale;
+    v->src_px = (struct ms_size){ (float)iw, (float)ih };
+    v->disp = ms_px_to_points((float)iw, (float)ih, scale);
     SDL_Log("view: img %dx%d px, scale=%.2f, image=%.0fx%.0f pts, tex=%p", iw,
-            ih, scale, pw->pin.w, pw->pin.h, (void *)pw->tex);
+            ih, scale, v->disp.w, v->disp.h, (void *)v->tex);
 
-    int ww = (int)ms_win_w(pw), wh = (int)ms_win_h(pw);
-    SDL_SetWindowSize(pw->win, ww, wh);
-    SDL_SetRenderLogicalPresentation(pw->ren, ww, wh,
+    int ww = (int)ms_win_w(v), wh = (int)ms_win_h(v);
+    SDL_SetWindowSize(v->win, ww, wh);
+    SDL_SetRenderLogicalPresentation(v->ren, ww, wh,
                                      SDL_LOGICAL_PRESENTATION_LETTERBOX);
-    SDL_SetWindowHitTest(pw->win, ms_view_hit_test, pw);
+    SDL_SetWindowHitTest(v->win, ms_view_hit_test, v);
 
-    pw->next = g_pins;
-    g_pins = pw;
+    v->next = g_views;
+    g_views = v;
     if (!g_watch_installed) {
         Uint32 evt = SDL_RegisterEvents(1);
         if (evt != (Uint32)-1) {
@@ -661,66 +670,64 @@ ms_view *ms_view_create(const char *png_path, int x, int y)
         g_watch_installed = true;
     }
 
-    SDL_ShowWindow(pw->win);
-    SDL_RaiseWindow(pw->win);
-    ms_view_draw(pw);
-    return pw;
+    SDL_ShowWindow(v->win);
+    SDL_RaiseWindow(v->win);
+    ms_view_draw(v);
+    return v;
 }
 
 void ms_view_tick(double dt)
 {
-    for (ms_view *pw = g_pins; pw; pw = pw->next) {
+    double now = ms_now();
+    for (struct ms_view *v = g_views; v; v = v->next) {
         bool animating = false;
         for (int i = 0; i < MS_TB_N; i++) {
-            if (pw->hit_t[i] >= 0.0f) {
-                pw->hit_t[i] += (float)dt;
-                if (pw->hit_t[i] >= MS_HIT_DUR) {
-                    pw->hit_t[i] = -1.0f;
+            if (v->pop_t[i] >= 0.0f) {
+                v->pop_t[i] += (float)dt;
+                if (v->pop_t[i] >= MS_POP_DUR) {
+                    v->pop_t[i] = -1.0f;
                 } else {
                     animating = true;
                 }
             }
         }
-        // Pinned ring and hover shimmer animate continuously; toast needs a
+        // Pinned border and hover shimmer animate continuously; toast needs a
         // final redraw to clear. Otherwise stay idle (0% CPU).
-        bool toast =
-            pw->toast.active && ms_now() < pw->toast.until + MS_TOAST_GRACE;
-        if (animating || pw->pinned || pw->hover_btn >= 0 || toast) {
-            ms_view_draw(pw);
+        bool toast = v->toast.active && now < v->toast.until + MS_TOAST_GRACE;
+        if (animating || v->pinned || v->hover_btn >= 0 || toast) {
+            ms_view_draw(v);
         }
     }
 }
 
-void ms_view_destroy(ms_view *pw)
+void ms_view_destroy(struct ms_view *v)
 {
-    if (!pw) {
+    if (!v) {
         return;
     }
-    for (ms_view **pp = &g_pins; *pp; pp = &(*pp)->next) {
-        if (*pp == pw) {
-            *pp = pw->next;
+    for (struct ms_view **pp = &g_views; *pp; pp = &(*pp)->next) {
+        if (*pp == v) {
+            *pp = v->next;
             break;
         }
     }
-    if (pw->win) {
-        SDL_SetWindowHitTest(pw->win, NULL, NULL);
+    if (v->win) {
+        SDL_SetWindowHitTest(v->win, NULL, NULL);
     }
     for (int i = 0; i < MS_TB_N; i++) {
-        if (pw->icons[i]) {
-            SDL_DestroyTexture(pw->icons[i]);
+        if (v->icons[i]) {
+            SDL_DestroyTexture(v->icons[i]);
         }
     }
-    if (pw->toast_tex) {
-        SDL_DestroyTexture(pw->toast_tex);
+    ms_label_cache_free(&v->toast_label);
+    if (v->tex) {
+        SDL_DestroyTexture(v->tex);
     }
-    if (pw->tex) {
-        SDL_DestroyTexture(pw->tex);
+    if (v->ren) {
+        SDL_DestroyRenderer(v->ren);
     }
-    if (pw->ren) {
-        SDL_DestroyRenderer(pw->ren);
+    if (v->win) {
+        SDL_DestroyWindow(v->win);
     }
-    if (pw->win) {
-        SDL_DestroyWindow(pw->win);
-    }
-    SDL_free(pw);
+    SDL_free(v);
 }

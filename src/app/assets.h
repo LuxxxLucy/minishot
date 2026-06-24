@@ -9,4 +9,7 @@
 #define MS_RESOURCES_DIR "../Resources/"  // app-bundle fallback location
 #define MS_CONFIG_FILE ".minishot.conf"   // under $HOME
 
+#define MS_LOG_PATH "/tmp/minishot.log"
+#define MS_TMP_CAPTURE_FMT "/tmp/minishot-%llu.png"  // %llu = ticks, unique
+
 #endif

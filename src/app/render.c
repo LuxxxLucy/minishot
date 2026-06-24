@@ -3,13 +3,34 @@
 #include "render.h"
 #include "stb_image.h"
 
-#define MS_CORNER_SEG 6  // arc segments per rounded corner
+#define MS_CORNER_SEG 6             // arc segments per rounded corner
+#define MS_ICON_OVERSAMPLE 2        // rasterize toolbar glyphs at 2x for retina
+#define MS_FONT_SIZE_DEFAULT 15.0f  // placeholder until init sets the real size
+#define MS_ICON_FONT_BASE_PX 64.0f  // open size; reset per-glyph at render time
+#define MS_GLYPH_RGBA ((SDL_Color){ 238, 238, 245, 255 })  // tinted at draw
+#define MS_TRAY_GLYPH_RGBA ((SDL_Color){ 244, 244, 246, 255 })  // menu template
 
 // Single font shared by all text rendering and measurement.
 static TTF_Font *g_font = NULL;
-static float g_font_size = 15.0f;
+static float g_font_size = MS_FONT_SIZE_DEFAULT;
+// The font object carries one active pixel size; track it so back-to-back
+// renders at the same size skip the resize call.
+static float g_font_px = MS_FONT_SIZE_DEFAULT;
+// Device-pixel oversample for Clay text: layout/measure stay in points, but
+// glyphs rasterize at g_ui_scale x so a high-DPI window draws them crisp.
+static float g_ui_scale = 1.0f;
+
+void ms_render_set_ui_scale(float s) { g_ui_scale = s > 0.0f ? s : 1.0f; }
 // Icon font (Lucide), sized per-glyph at render time.
 static TTF_Font *g_icon_font = NULL;
+
+static void set_font_px(float px)
+{
+    if (px != g_font_px) {
+        TTF_SetFontSize(g_font, px);
+        g_font_px = px;
+    }
+}
 
 static SDL_FRect to_frect(Clay_BoundingBox b)
 {
@@ -30,6 +51,37 @@ void ms_fill_quad(SDL_Renderer *r, SDL_FPoint p0, SDL_FPoint p1, SDL_FPoint p2,
         { p0, c0, { 0, 0 } }, { p2, c2, { 0, 0 } }, { p3, c3, { 0, 0 } },
     };
     SDL_RenderGeometry(r, NULL, v, 6, NULL, 0);
+}
+
+void ms_border_corners(SDL_FRect inner, float border, SDL_FPoint outer[4],
+                       SDL_FPoint inner_pts[4])
+{
+    float B = border;
+    outer[0] = (SDL_FPoint){ inner.x - B, inner.y - B };
+    outer[1] = (SDL_FPoint){ inner.x + inner.w + B, inner.y - B };
+    outer[2] = (SDL_FPoint){ inner.x + inner.w + B, inner.y + inner.h + B };
+    outer[3] = (SDL_FPoint){ inner.x - B, inner.y + inner.h + B };
+    inner_pts[0] = (SDL_FPoint){ inner.x, inner.y };
+    inner_pts[1] = (SDL_FPoint){ inner.x + inner.w, inner.y };
+    inner_pts[2] = (SDL_FPoint){ inner.x + inner.w, inner.y + inner.h };
+    inner_pts[3] = (SDL_FPoint){ inner.x, inner.y + inner.h };
+}
+
+void ms_draw_rainbow_border(SDL_Renderer *ren, SDL_FRect inner, float border,
+                            float tsec)
+{
+    SDL_FPoint O[4], I[4];
+    ms_border_corners(inner, border, O, I);
+    SDL_FColor c[4];
+    for (int i = 0; i < 4; i++) {
+        Uint8 r, g, b;
+        ms_hsv_rgb((float)i / 4.0f + tsec * 0.15f, 0.85f, 1.0f, &r, &g, &b);
+        c[i] = (SDL_FColor){ r / 255.0f, g / 255.0f, b / 255.0f, 1.0f };
+    }
+    for (int e = 0; e < 4; e++) {
+        int a = e, b = (e + 1) % 4;
+        ms_fill_quad(ren, O[a], O[b], I[b], I[a], c[a], c[b], c[b], c[a]);
+    }
 }
 
 // Convert a freshly rendered surface to a texture, write its pixel size to
@@ -124,6 +176,14 @@ void ms_draw_rounded_rect(SDL_Renderer *ren, SDL_FRect rect, float radius,
     SDL_RenderGeometry(ren, NULL, verts, vn, NULL, 0);
 }
 
+// Rasterize a NUL-terminated string at the font's current size into a texture.
+static SDL_Texture *render_str(SDL_Renderer *ren, const char *str,
+                               SDL_Color color, int *w, int *h)
+{
+    SDL_Surface *surf = TTF_RenderText_Blended(g_font, str, 0, color);
+    return ms_texture_from_surface(ren, surf, w, h);
+}
+
 // Draw a Clay text command by rasterizing the slice with TTF and blitting it.
 static void render_text(SDL_Renderer *ren, Clay_TextRenderData t,
                         SDL_FRect rect)
@@ -133,6 +193,11 @@ static void render_text(SDL_Renderer *ren, Clay_TextRenderData t,
     }
     SDL_Color fg = { (Uint8)t.textColor.r, (Uint8)t.textColor.g,
                      (Uint8)t.textColor.b, (Uint8)t.textColor.a };
+    // Rasterize at fontSize x ui-scale device pixels, then place into a
+    // point-sized box; the renderer's logical presentation maps points back to
+    // device pixels 1:1, so the glyphs stay sharp.
+    float pt = t.fontSize > 0 ? (float)t.fontSize : g_font_size;
+    set_font_px(pt * g_ui_scale);
     SDL_Surface *surf = TTF_RenderText_Blended(
         g_font, t.stringContents.chars, (size_t)t.stringContents.length, fg);
     int tw = 0, th = 0;
@@ -140,7 +205,8 @@ static void render_text(SDL_Renderer *ren, Clay_TextRenderData t,
     if (!tex) {
         return;
     }
-    SDL_FRect dst = { rect.x, rect.y, (float)tw, (float)th };
+    SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+    SDL_FRect dst = { rect.x, rect.y, tw / g_ui_scale, th / g_ui_scale };
     SDL_RenderTexture(ren, tex, NULL, &dst);
     SDL_DestroyTexture(tex);
 }
@@ -230,6 +296,7 @@ int ms_render_init_font(const char *ttf_path, float size)
     }
     g_font = TTF_OpenFont(ttf_path, size);
     g_font_size = size;
+    g_font_px = size;
     return g_font ? 0 : -1;
 }
 
@@ -242,7 +309,7 @@ int ms_render_init_icon_font(const char *ttf_path)
         TTF_CloseFont(g_icon_font);
         g_icon_font = NULL;
     }
-    g_icon_font = TTF_OpenFont(ttf_path, 64.0f);  // size set per-glyph below
+    g_icon_font = TTF_OpenFont(ttf_path, MS_ICON_FONT_BASE_PX);
     return g_icon_font ? 0 : -1;
 }
 
@@ -270,32 +337,59 @@ SDL_Texture *ms_render_text(SDL_Renderer *ren, const char *str, SDL_Color color,
     if (!g_font || !str) {
         return NULL;
     }
-    SDL_Surface *surf = TTF_RenderText_Blended(g_font, str, 0, color);
-    return ms_texture_from_surface(ren, surf, w, h);
+    set_font_px(g_font_size);
+    return render_str(ren, str, color, w, h);
 }
 
 SDL_Texture *ms_render_text_sized(SDL_Renderer *ren, const char *str, float px,
                                   SDL_Color color, int *w, int *h)
 {
-    if (!g_font) {
+    if (!g_font || !str) {
         return NULL;
     }
-    TTF_SetFontSize(g_font, px);
-    SDL_Texture *tex = ms_render_text(ren, str, color, w, h);
-    TTF_SetFontSize(g_font, g_font_size);
-    return tex;
+    set_font_px(px);
+    return render_str(ren, str, color, w, h);
+}
+
+SDL_Texture *ms_label_cache_get(SDL_Renderer *ren, struct ms_label_cache *c,
+                                const char *msg, float px)
+{
+    if (!c->tex || SDL_strcmp(c->msg, msg) != 0) {
+        if (c->tex) {
+            SDL_DestroyTexture(c->tex);
+        }
+        SDL_Color white = { 255, 255, 255, 255 };
+        c->tex = ms_render_text_sized(ren, msg, px, white, &c->w, &c->h);
+        SDL_strlcpy(c->msg, msg, sizeof(c->msg));
+    }
+    return c->tex;
+}
+
+void ms_label_cache_free(struct ms_label_cache *c)
+{
+    if (c->tex) {
+        SDL_DestroyTexture(c->tex);
+        c->tex = NULL;
+    }
+    c->msg[0] = '\0';
+    c->w = c->h = 0;
 }
 
 Clay_Dimensions ms_render_measure_text(Clay_StringSlice text,
                                        Clay_TextElementConfig *cfg, void *ud)
 {
-    (void)cfg;
     (void)ud;
     if (!g_font || text.length <= 0) {
         return (Clay_Dimensions){ 0, 0 };
     }
+    // Measure in points (no ui-scale) so layout matches the point-sized boxes
+    // render_text draws into.
+    float pt = (cfg && cfg->fontSize > 0) ? (float)cfg->fontSize : g_font_size;
+    set_font_px(pt);
     int w = 0, h = 0;
-    if (!TTF_GetStringSize(g_font, text.chars, (size_t)text.length, &w, &h)) {
+    bool ok =
+        TTF_GetStringSize(g_font, text.chars, (size_t)text.length, &w, &h);
+    if (!ok) {
         return (Clay_Dimensions){ 0, 0 };
     }
     return (Clay_Dimensions){ (float)w, (float)h };
@@ -304,7 +398,7 @@ Clay_Dimensions ms_render_measure_text(Clay_StringSlice text,
 // --- Icons (Lucide glyphs) ---------------------------------------------------
 
 // Lucide codepoints, verified against the bundled font's info.json.
-static Uint32 ms_icon_codepoint(ms_icon_kind kind)
+static Uint32 ms_icon_codepoint(enum ms_icon_kind kind)
 {
     switch (kind) {
         case MS_ICON_PIN:
@@ -323,14 +417,14 @@ static Uint32 ms_icon_codepoint(ms_icon_kind kind)
     return 0xE1B2;
 }
 
-SDL_Texture *ms_icon_make(SDL_Renderer *ren, ms_icon_kind kind, int size)
+SDL_Texture *ms_icon_make(SDL_Renderer *ren, enum ms_icon_kind kind, int size)
 {
     if (!ren || size <= 0) {
         return NULL;
     }
-    SDL_Color white = { 238, 238, 245, 255 };
-    SDL_Texture *tex =
-        ms_render_glyph(ren, ms_icon_codepoint(kind), size * 2, white);
+    SDL_Color white = MS_GLYPH_RGBA;
+    SDL_Texture *tex = ms_render_glyph(ren, ms_icon_codepoint(kind),
+                                       size * MS_ICON_OVERSAMPLE, white);
     if (tex) {
         SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
     }
@@ -342,7 +436,7 @@ SDL_Surface *ms_icon_tray_surface(int px)
     if (px <= 0) {
         return NULL;
     }
-    SDL_Color white = { 244, 244, 246, 255 };
+    SDL_Color white = MS_TRAY_GLYPH_RGBA;
     return ms_render_glyph_surface(ms_icon_codepoint(MS_ICON_TRAY), px, white);
 }
 

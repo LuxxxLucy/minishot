@@ -16,6 +16,11 @@ int ms_render_init_font(const char *ttf_path, float size);
 // Load the icon font (Lucide). Returns 0 on success, -1 on failure.
 int ms_render_init_icon_font(const char *ttf_path);
 
+// Set the device-pixel oversample for clay_render text (default 1.0). Pass a
+// high-DPI window's pixel density so Clay-drawn text rasterizes crisp; reset to
+// 1.0 when that window closes.
+void ms_render_set_ui_scale(float s);
+
 // Clay text-measure callback.
 Clay_Dimensions ms_render_measure_text(Clay_StringSlice text,
                                        Clay_TextElementConfig *cfg, void *ud);
@@ -37,6 +42,20 @@ SDL_Texture *ms_render_text(SDL_Renderer *ren, const char *str, SDL_Color color,
 SDL_Texture *ms_render_text_sized(SDL_Renderer *ren, const char *str, float px,
                                   SDL_Color color, int *w, int *h);
 
+// Cached white label texture: re-rasterizes only when the string changes, so an
+// animated frame redrawing the same label reuses the texture. Zero-initialize.
+struct ms_label_cache {
+    SDL_Texture *tex;
+    char msg[256];
+    int w, h;
+};
+
+// Texture for `msg` at `px` device pixels, rasterized on a cache miss. Size
+// goes to c->w/c->h. Returns NULL on failure. Free with ms_label_cache_free.
+SDL_Texture *ms_label_cache_get(SDL_Renderer *ren, struct ms_label_cache *c,
+                                const char *msg, float px);
+void ms_label_cache_free(struct ms_label_cache *c);
+
 // Filled rounded rectangle via SDL_RenderGeometry (anti-aliased-ish corners).
 void ms_draw_rounded_rect(SDL_Renderer *ren, SDL_FRect rect, float radius,
                           Clay_Color color);
@@ -45,6 +64,17 @@ void ms_draw_rounded_rect(SDL_Renderer *ren, SDL_FRect rect, float radius,
 void ms_fill_quad(SDL_Renderer *r, SDL_FPoint p0, SDL_FPoint p1, SDL_FPoint p2,
                   SDL_FPoint p3, SDL_FColor c0, SDL_FColor c1, SDL_FColor c2,
                   SDL_FColor c3);
+
+// Corner points of a `border`-wide stroke around `inner`: outer ring into
+// `outer[4]`, inner ring into `inner_pts[4]`, clockwise from top-left. A border
+// edge `e` is the quad outer[e], outer[e+1], inner[e+1], inner[e].
+void ms_border_corners(SDL_FRect inner, float border, SDL_FPoint outer[4],
+                       SDL_FPoint inner_pts[4]);
+
+// Draw a flowing rainbow border of width `border` around `inner`, hue rotating
+// with `tsec` (seconds). Coordinates are in the caller's pixel space.
+void ms_draw_rainbow_border(SDL_Renderer *ren, SDL_FRect inner, float border,
+                            float tsec);
 
 // --- Animation easing (delta-time tweens; idioms from tsoding/panim) ---------
 
@@ -137,18 +167,18 @@ static inline void ms_hsv_rgb(float h, float s, float v, Uint8 *r, Uint8 *g,
 
 // --- Icons (Lucide glyphs) ---------------------------------------------------
 
-typedef enum {
+enum ms_icon_kind {
     MS_ICON_PIN,
     MS_ICON_COPY,
     MS_ICON_SAVE,
     MS_ICON_DELETE,
     MS_ICON_CANCEL,
     MS_ICON_TRAY,
-} ms_icon_kind;
+};
 
 // White Lucide glyph for `kind` at `size` points (rasterized at 2x for retina).
 // Tint at draw time via texture color mod. Caller owns the texture.
-SDL_Texture *ms_icon_make(SDL_Renderer *ren, ms_icon_kind kind, int size);
+SDL_Texture *ms_icon_make(SDL_Renderer *ren, enum ms_icon_kind kind, int size);
 
 // Tray glyph (Lucide camera) at `px` pixels, white on transparent, as a new
 // SDL_Surface for SDL_CreateTray. Caller owns it.

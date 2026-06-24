@@ -5,7 +5,6 @@
 #include "clay.h"
 #include "render.h"
 
-#include "appstate.h"
 #include "assets.h"
 #include "capture.h"
 #include "config.h"
@@ -14,6 +13,8 @@
 #include "overlay.h"
 #include "view.h"
 #include "settings.h"
+
+#define MS_FRAME_DELAY_MS 16  // ~60 fps main-loop pacing
 
 // Log to a file as well as stderr, so a GUI launch leaves a trail to inspect.
 static FILE *g_log_file = NULL;
@@ -32,7 +33,7 @@ static void ms_log_output(void *ud, int category, SDL_LogPriority pri,
 
 static void ms_log_init(void)
 {
-    const char *path = "/tmp/minishot.log";
+    const char *path = MS_LOG_PATH;
     g_log_file = fopen(path, "w");
     SDL_SetLogOutputFunction(ms_log_output, NULL);
     SDL_SetLogPriorities(SDL_LOG_PRIORITY_VERBOSE);
@@ -85,19 +86,33 @@ static void quit_cb(void *userdata, SDL_TrayEntry *entry)
     SDL_PushEvent(&quit);
 }
 
+#define MS_TRAY_ICON_PX 36
+#define MS_FALLBACK_ICON_PX 22
+#define MS_FALLBACK_ICON_RGBA 240, 240, 245, 255
+
 static SDL_Surface *make_icon(void)
 {
     // Lucide camera glyph; macOS renders it as a monochrome menu-bar template.
-    SDL_Surface *s = ms_icon_tray_surface(36);
+    SDL_Surface *s = ms_icon_tray_surface(MS_TRAY_ICON_PX);
     if (s) {
         return s;
     }
     // Fallback: a plain dot if the icon font failed to load.
-    s = SDL_CreateSurface(22, 22, SDL_PIXELFORMAT_RGBA32);
+    s = SDL_CreateSurface(MS_FALLBACK_ICON_PX, MS_FALLBACK_ICON_PX,
+                          SDL_PIXELFORMAT_RGBA32);
     if (s) {
-        SDL_FillSurfaceRect(s, NULL, SDL_MapSurfaceRGBA(s, 240, 240, 245, 255));
+        SDL_FillSurfaceRect(s, NULL,
+                            SDL_MapSurfaceRGBA(s, MS_FALLBACK_ICON_RGBA));
     }
     return s;
+}
+
+static void add_tray_button(SDL_TrayMenu *menu, const char *label,
+                            SDL_TrayCallback cb)
+{
+    SDL_TrayEntry *e =
+        SDL_InsertTrayEntryAt(menu, -1, label, SDL_TRAYENTRY_BUTTON);
+    SDL_SetTrayEntryCallback(e, cb, NULL);
 }
 
 static SDL_Tray *make_tray(void)
@@ -112,40 +127,28 @@ static SDL_Tray *make_tray(void)
     }
 
     SDL_TrayMenu *menu = SDL_CreateTrayMenu(tray);
-    SDL_TrayEntry *cap =
-        SDL_InsertTrayEntryAt(menu, -1, "Capture", SDL_TRAYENTRY_BUTTON);
-    SDL_SetTrayEntryCallback(cap, capture_cb, NULL);
+    add_tray_button(menu, "Capture", capture_cb);
     SDL_InsertTrayEntryAt(menu, -1, NULL, SDL_TRAYENTRY_BUTTON);  // separator
-    SDL_TrayEntry *set =
-        SDL_InsertTrayEntryAt(menu, -1, "Settings", SDL_TRAYENTRY_BUTTON);
-    SDL_SetTrayEntryCallback(set, settings_cb, NULL);
-    SDL_TrayEntry *quit =
-        SDL_InsertTrayEntryAt(menu, -1, "Quit", SDL_TRAYENTRY_BUTTON);
-    SDL_SetTrayEntryCallback(quit, quit_cb, NULL);
+    add_tray_button(menu, "Settings", settings_cb);
+    add_tray_button(menu, "Quit", quit_cb);
     return tray;
 }
 
 // ----------------------------------------------------------------------------
-// Capture flow: overlay -> screencapture -> floating pin window.
-// Driven by the IDLE -> SELECTING -> ACTION_MENU -> IDLE state machine.
+// Capture flow: overlay -> screencapture -> floating view window.
+// Runs synchronously start-to-finish; the overlay blocks until the user
+// finishes or cancels.
 // ----------------------------------------------------------------------------
 
-static void ms_run_capture_flow(ms_app_state *state)
+static void ms_run_capture_flow(void)
 {
     SDL_Log("capture flow: begin");
-    *state = ms_app_next(*state, MINISHOT_EV_HOTKEY);  // IDLE -> SELECTING
-    if (*state != MINISHOT_SELECTING) {
-        return;
-    }
-
-    ms_overlay_result sel = ms_overlay_run();
+    struct ms_overlay_result sel = ms_overlay_run();
     SDL_Log("overlay: cancelled=%d rect=(%.0f,%.0f %.0fx%.0f)", sel.cancelled,
             sel.rect.x, sel.rect.y, sel.rect.w, sel.rect.h);
     if (sel.cancelled) {
-        *state = ms_app_next(*state, MINISHOT_EV_SELECT_CANCEL);  // -> IDLE
         return;
     }
-    *state = ms_app_next(*state, MINISHOT_EV_SELECT_DONE);  // -> ACTION_MENU
 
     int x = (int)(sel.rect.x + 0.5f);
     int y = (int)(sel.rect.y + 0.5f);
@@ -153,33 +156,29 @@ static void ms_run_capture_flow(ms_app_state *state)
     int h = (int)(sel.rect.h + 0.5f);
     if (w < 1 || h < 1) {
         SDL_Log("selection too small (%dx%d); aborting", w, h);
-        *state = ms_app_next(*state, MINISHOT_EV_SELECT_CANCEL);
         return;
     }
 
     char tmp_png[1024];
-    SDL_snprintf(tmp_png, sizeof(tmp_png), "/tmp/minishot-%llu.png",
+    SDL_snprintf(tmp_png, sizeof(tmp_png), MS_TMP_CAPTURE_FMT,
                  (unsigned long long)SDL_GetTicksNS());
 
-    int rc = ms_capture_run(MINISHOT_CAP_FILE, x, y, w, h, tmp_png);
+    int rc = ms_capture_run(x, y, w, h, tmp_png);
     SDL_Log("capture: rc=%d path=%s", rc, tmp_png);
     if (rc != 0) {
         SDL_Log("capture failed (rc=%d)", rc);
         SDL_RemovePath(tmp_png);  // may have left a partial file
-        *state = ms_app_next(*state, MINISHOT_EV_SELECT_CANCEL);
         return;
     }
 
     // The captured region appears immediately as a floating, draggable window
     // placed over the selection. It owns tmp_png for its copy/save buttons; on
     // failure we delete the temp file to avoid leaking one per capture.
-    ms_view *pw = ms_view_create(tmp_png, x, y);
-    SDL_Log("pin window create: %s", pw ? "ok" : "FAILED");
-    if (!pw) {
+    struct ms_view *v = ms_view_create(tmp_png, x, y);
+    SDL_Log("view create: %s", v ? "ok" : "FAILED");
+    if (!v) {
         SDL_RemovePath(tmp_png);
     }
-
-    *state = ms_app_next(*state, MINISHOT_EV_ACTION_CHOSEN);  // -> IDLE
 }
 
 // ----------------------------------------------------------------------------
@@ -229,7 +228,7 @@ int main(void)
         g_capture_event = 0;
     }
 
-    ms_config cfg;
+    struct ms_config cfg;
     ms_config_load(&cfg);
 
     // Shared Clay arena + context for the app (tray/action menus create their
@@ -263,21 +262,16 @@ int main(void)
         SDL_Log("tray failed: %s", SDL_GetError());
     }
 
-    // Register the global hotkey. The Carbon-backed registration is a stub for
-    // now (returns -1); the tray "Capture" item posts the same event so the
-    // flow is fully exercisable meanwhile.
-    ms_hotkey hk = ms_hotkey_parse(cfg.hotkey);
+    // Register the global hotkey via Carbon. If it does not register, the tray
+    // "Capture" item posts the same event.
+    struct ms_hotkey hk = ms_hotkey_parse(cfg.hotkey);
     if (hk.ok) {
         if (ms_hotkey_register(hk, hotkey_cb, NULL) != 0) {
-            SDL_Log(
-                "hotkey '%s' not registered (Carbon stub); use tray Capture",
-                cfg.hotkey);
+            SDL_Log("hotkey '%s' not registered; use tray Capture", cfg.hotkey);
         }
     } else {
         SDL_Log("hotkey '%s' did not parse", cfg.hotkey);
     }
-
-    ms_app_state state = MINISHOT_IDLE;
 
     bool running = true;
     Uint64 last = SDL_GetTicks();
@@ -287,16 +281,14 @@ int main(void)
             if (ev.type == SDL_EVENT_QUIT) {
                 running = false;
             } else if (g_capture_event != 0 && ev.type == g_capture_event) {
-                if (state == MINISHOT_IDLE) {
-                    ms_run_capture_flow(&state);
-                }
+                ms_run_capture_flow();
             }
-            // Pin-window events are routed by view's own SDL_AddEventWatch.
+            // View events are routed by view's own SDL_AddEventWatch.
         }
         Uint64 now = SDL_GetTicks();
-        ms_view_tick((double)(now - last) / 1000.0);  // drive pin animations
+        ms_view_tick((double)(now - last) / 1000.0);  // drive view animations
         last = now;
-        SDL_Delay(16);
+        SDL_Delay(MS_FRAME_DELAY_MS);
     }
 
     if (tray) {

@@ -21,9 +21,9 @@ static int mod_bit(const char *tok, size_t len)
     return 0;
 }
 
-ms_hotkey ms_hotkey_parse(const char *s)
+struct ms_hotkey ms_hotkey_parse(const char *s)
 {
-    ms_hotkey hk = { 0, 0, 0 };
+    struct ms_hotkey hk = { 0, 0, 0 };
     if (s == NULL || *s == '\0') {
         return hk;
     }
@@ -157,7 +157,7 @@ static int ascii_to_vk(unsigned c)
     }
 }
 
-int ms_hotkey_register(ms_hotkey hk, void (*cb)(void *ud), void *ud)
+int ms_hotkey_register(struct ms_hotkey hk, void (*cb)(void *ud), void *ud)
 {
     if (!hk.ok) {
         return -1;
@@ -194,7 +194,7 @@ int ms_hotkey_register(ms_hotkey hk, void (*cb)(void *ud), void *ud)
     return st == noErr ? 0 : -1;
 }
 #else
-int ms_hotkey_register(ms_hotkey hk, void (*cb)(void *ud), void *ud)
+int ms_hotkey_register(struct ms_hotkey hk, void (*cb)(void *ud), void *ud)
 {
     (void)hk;
     (void)cb;

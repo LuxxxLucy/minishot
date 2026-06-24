@@ -3,6 +3,15 @@
 #include <SDL3/SDL.h>
 
 #include "render.h"
+#include "theme.h"
+
+#define MS_OVERLAY_DIM_A 102   // backdrop darkness over the screen
+#define MS_SEL_BORDER 2.5f     // animated selection border width (points)
+#define MS_BADGE_OFFSET 14.0f  // badge distance from cursor (points)
+#define MS_BADGE_PAD_X 8.0f
+#define MS_BADGE_PAD_Y 4.0f
+#define MS_BADGE_RADIUS 6.0f
+#define MS_OVERLAY_FRAME_MS 8  // snappy drag-feedback pacing
 
 static SDL_Window *ms_overlay_create_window(SDL_Rect bounds)
 {
@@ -34,9 +43,9 @@ static SDL_Window *ms_overlay_create_window(SDL_Rect bounds)
     return win;
 }
 
-ms_overlay_result ms_overlay_run(void)
+struct ms_overlay_result ms_overlay_run(void)
 {
-    ms_overlay_result res = { { 0, 0, 0, 0 }, 1 };
+    struct ms_overlay_result res = { { 0, 0, 0, 0 }, 1 };
 
     SDL_Rect bounds = { 0, 0, 0, 0 };
     SDL_DisplayID display = SDL_GetPrimaryDisplay();
@@ -75,12 +84,10 @@ ms_overlay_result ms_overlay_run(void)
 
     bool dragging = false, done = false, cancelled = true;
     float anchor_x = 0, anchor_y = 0, cur_x = 0, cur_y = 0;
-    ms_rect sel = { 0, 0, 0, 0 };
+    struct ms_rect sel = { 0, 0, 0, 0 };
 
     // The W x H badge is re-rasterized only when the dimension string changes.
-    SDL_Texture *badge = NULL;
-    char badge_label[64] = "";
-    int badge_w = 0, badge_h = 0;
+    struct ms_label_cache badge = { 0 };
 
     while (!done) {
         SDL_Event ev;
@@ -130,14 +137,14 @@ ms_overlay_result ms_overlay_run(void)
             }
         }
 
-        ms_rect live = dragging
-                           ? ms_rect_from_drag(anchor_x, anchor_y, cur_x, cur_y)
-                           : sel;
+        struct ms_rect live =
+            dragging ? ms_rect_from_drag(anchor_x, anchor_y, cur_x, cur_y)
+                     : sel;
 
         // Neutral dim backdrop.
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 0);
         SDL_RenderClear(ren);
-        SDL_SetRenderDrawColor(ren, 0, 0, 0, 102);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, MS_OVERLAY_DIM_A);
         SDL_RenderFillRect(ren, NULL);
 
         if (dragging && live.w >= 1.0f && live.h >= 1.0f) {
@@ -149,48 +156,37 @@ ms_overlay_result ms_overlay_run(void)
             SDL_RenderFillRect(ren, &r);
             SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
 
-            // White rubber-band (2px) with a faint dark inner edge.
-            SDL_SetRenderDrawColor(ren, 255, 255, 255, 230);
-            SDL_RenderRect(ren, &r);
-            SDL_FRect r2 = { r.x + 1, r.y + 1, r.w - 2, r.h - 2 };
-            SDL_RenderRect(ren, &r2);
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 51);
-            SDL_FRect r3 = { r.x + 2, r.y + 2, r.w - 4, r.h - 4 };
-            SDL_RenderRect(ren, &r3);
+            // Animated rainbow border (same flow as the pinned view's border).
+            float tsec = SDL_GetTicks() / 1000.0f;
+            ms_draw_rainbow_border(ren, r, MS_SEL_BORDER * s, tsec);
 
             // Crisp "W x H" badge near the cursor.
             char label[64];
             SDL_snprintf(label, sizeof(label), "%d \xc3\x97 %d",
                          (int)(live.w + 0.5f), (int)(live.h + 0.5f));
-            if (!badge || SDL_strcmp(label, badge_label) != 0) {
-                if (badge) {
-                    SDL_DestroyTexture(badge);
-                }
-                SDL_Color fg = { 255, 255, 255, 255 };
-                badge = ms_render_text_sized(ren, label, 13.0f * s, fg,
-                                             &badge_w, &badge_h);
-                SDL_strlcpy(badge_label, label, sizeof(badge_label));
-            }
-            if (badge) {
-                float padx = 8 * s, pady = 4 * s;
-                float bw = badge_w + 2 * padx, bh = badge_h + 2 * pady;
-                float bx = (cur_x + 14) * s, by = (cur_y + 14) * s;
+            SDL_Texture *bt =
+                ms_label_cache_get(ren, &badge, label, MS_LABEL_FONT_PT * s);
+            if (bt) {
+                float padx = MS_BADGE_PAD_X * s, pady = MS_BADGE_PAD_Y * s;
+                float bw = badge.w + 2 * padx, bh = badge.h + 2 * pady;
+                float bx = (cur_x + MS_BADGE_OFFSET) * s;
+                float by = (cur_y + MS_BADGE_OFFSET) * s;
                 if (bx + bw > bounds.w * s) {
-                    bx = (cur_x - 14) * s - bw;
+                    bx = (cur_x - MS_BADGE_OFFSET) * s - bw;
                 }
                 if (by + bh > bounds.h * s) {
-                    by = (cur_y - 14) * s - bh;
+                    by = (cur_y - MS_BADGE_OFFSET) * s - bh;
                 }
-                ms_draw_rounded_rect(ren, (SDL_FRect){ bx, by, bw, bh }, 6 * s,
-                                     (Clay_Color){ 28, 28, 32, 224 });
-                SDL_FRect dst = { bx + padx, by + pady, (float)badge_w,
-                                  (float)badge_h };
-                SDL_RenderTexture(ren, badge, NULL, &dst);
+                ms_draw_rounded_rect(ren, (SDL_FRect){ bx, by, bw, bh },
+                                     MS_BADGE_RADIUS * s, MS_COL_PILL);
+                SDL_FRect dst = { bx + padx, by + pady, (float)badge.w,
+                                  (float)badge.h };
+                SDL_RenderTexture(ren, bt, NULL, &dst);
             }
         }
 
         SDL_RenderPresent(ren);
-        SDL_Delay(8);
+        SDL_Delay(MS_OVERLAY_FRAME_MS);
     }
 
     if (!cancelled) {
@@ -202,9 +198,7 @@ ms_overlay_result ms_overlay_run(void)
         res.cancelled = 1;
     }
 
-    if (badge) {
-        SDL_DestroyTexture(badge);
-    }
+    ms_label_cache_free(&badge);
     if (crosshair) {
         SDL_SetCursor(SDL_GetDefaultCursor());
         SDL_DestroyCursor(crosshair);

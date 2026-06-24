@@ -4,9 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
-ms_config ms_config_default(void)
+struct ms_config ms_config_default(void)
 {
-    ms_config cfg;
+    struct ms_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     strcpy(cfg.save_dir, "~/Downloads");
     strcpy(cfg.hotkey, "cmd+shift+a");
@@ -28,7 +28,7 @@ static void copy_field(char *dst, size_t cap, const char *begin,
     dst[len] = '\0';
 }
 
-int ms_config_parse(ms_config *cfg, const char *text)
+int ms_config_parse(struct ms_config *cfg, const char *text)
 {
     const char *p = text;
     while (*p) {
@@ -95,7 +95,7 @@ int ms_config_parse(ms_config *cfg, const char *text)
     return 0;
 }
 
-int ms_config_serialize(const ms_config *cfg, char *out, size_t n)
+int ms_config_serialize(const struct ms_config *cfg, char *out, size_t n)
 {
     int written = snprintf(out, n, "save_dir=%s\nhotkey=%s\n", cfg->save_dir,
                            cfg->hotkey);

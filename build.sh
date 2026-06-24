@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # MiniShot build driver.
+#   ./build.sh fetch    download third-party headers and the icon font
 #   ./build.sh build    configure + build everything
 #   ./build.sh test     build + run unit tests
 #   ./build.sh bundle   build + assemble MiniShot.app
@@ -11,12 +12,31 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$ROOT/build"
 PREFIX="$(brew --prefix)"
 
-# Bundled assets are downloaded, never committed (see .gitignore).
-LUCIDE_URL="https://unpkg.com/lucide-static@1.21.0/font/lucide.ttf"
+# Third-party sources, pinned by commit; downloaded, never committed.
+# To upgrade, bump the pin on the matching line.
+CLAY_SHA="139802baaa144c3a674db72efc25685f68fe391f"
+STB_SHA="f056911"
+LUCIDE_VERSION="1.21.0"
 
-fetch_assets() {
+CLAY_URL="https://raw.githubusercontent.com/nicbarker/clay/$CLAY_SHA/clay.h"
+STB_IMAGE_URL="https://raw.githubusercontent.com/nothings/stb/$STB_SHA/stb_image.h"
+LUCIDE_URL="https://unpkg.com/lucide-static@$LUCIDE_VERSION/font/lucide.ttf"
+
+# Download to $1 from $2 only when absent.
+fetch_one() {
+    if [ -f "$1" ]; then
+        echo "have $(basename "$1")"
+    else
+        echo "fetch $(basename "$1")"
+        curl -fsSL -o "$1" "$2"
+    fi
+}
+
+fetch() {
     mkdir -p "$ROOT/assets"
-    [ -f "$ROOT/assets/lucide.ttf" ] || curl -fsSL -o "$ROOT/assets/lucide.ttf" "$LUCIDE_URL"
+    fetch_one "$ROOT/3rd/clay/clay.h" "$CLAY_URL"
+    fetch_one "$ROOT/3rd/stb/stb_image.h" "$STB_IMAGE_URL"
+    fetch_one "$ROOT/assets/lucide.ttf" "$LUCIDE_URL"
 }
 
 # Place runtime assets next to the dev binary so SDL_GetBasePath() resolves them.
@@ -29,19 +49,23 @@ configure() {
 }
 
 case "${1:-build}" in
+    fetch)
+        fetch
+        ;;
     build)
-        fetch_assets
+        fetch
         configure
         cmake --build "$BUILD"
         stage_assets
         ;;
     test)
+        fetch
         configure
         cmake --build "$BUILD"
         ctest --test-dir "$BUILD" --output-on-failure
         ;;
     bundle)
-        fetch_assets
+        fetch
         configure
         cmake --build "$BUILD" --target minishot
         APP="$BUILD/MiniShot.app"
@@ -54,7 +78,7 @@ case "${1:-build}" in
         echo "built $APP"
         ;;
     run)
-        fetch_assets
+        fetch
         configure
         cmake --build "$BUILD" --target minishot
         stage_assets
@@ -64,7 +88,7 @@ case "${1:-build}" in
         rm -rf "$BUILD"
         ;;
     *)
-        echo "usage: $0 {build|test|bundle|run|clean}" >&2
+        echo "usage: $0 {fetch|build|test|bundle|run|clean}" >&2
         exit 1
         ;;
 esac

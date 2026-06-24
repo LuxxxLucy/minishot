@@ -3,21 +3,15 @@
 
 #include <stddef.h>
 
-typedef enum { MINISHOT_CAP_FILE, MINISHOT_CAP_CLIPBOARD } ms_capture_mode;
-
 // Build the argv for /usr/sbin/screencapture capturing the rect (x,y,w,h) in
-// global screen points.
-//   MS_CAP_FILE:      screencapture -x -R x,y,w,h <path>
-//   MS_CAP_CLIPBOARD: screencapture -x -c -R x,y,w,h
+// global screen points to a file: screencapture -x -R x,y,w,h <path>.
 // argv pointers (up to max, NULL-terminated) point into buf, where the strings
-// are packed. Returns argc, or -1 on argv/buf overflow.
-int ms_capture_build_argv(char **argv, int max, char *buf, size_t bufn,
-                          ms_capture_mode mode, int x, int y, int w, int h,
-                          const char *path);
+// are packed. Returns argc, or -1 on a NULL path or argv/buf overflow.
+int ms_capture_build_argv(char **argv, int max, char *buf, size_t bufn, int x,
+                          int y, int w, int h, const char *path);
 
 // fork/exec the built command and wait. Returns the child exit status,
 // or -1 if the process could not be spawned.
-int ms_capture_run(ms_capture_mode mode, int x, int y, int w, int h,
-                   const char *path);
+int ms_capture_run(int x, int y, int w, int h, const char *path);
 
 #endif
