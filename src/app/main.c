@@ -210,6 +210,9 @@ static int ms_init_icon_font(void)
 
 int main(void)
 {
+    // hint SDL to not show the app in the Dock, but rather as a background app
+    SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
+
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;

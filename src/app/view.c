@@ -670,8 +670,11 @@ struct ms_view *ms_view_create(const char *png_path, int x, int y)
         g_watch_installed = true;
     }
 
+    // Pop above the foreground app on creation
     SDL_ShowWindow(v->win);
+    SDL_SetWindowAlwaysOnTop(v->win, true);
     SDL_RaiseWindow(v->win);
+    SDL_SetWindowAlwaysOnTop(v->win, false);
     ms_view_draw(v);
     return v;
 }
