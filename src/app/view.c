@@ -12,6 +12,7 @@
 #include "render.h"
 #include "settings.h"
 #include "theme.h"
+#include "util.h"
 
 // Layout (window points). A rounded card (image at top inside an animated
 // border, toolbar below) floats on a soft drop shadow. The window carries

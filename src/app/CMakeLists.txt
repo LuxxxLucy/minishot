@@ -7,5 +7,5 @@ add_executable(minishot
 target_include_directories(minishot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(minishot PRIVATE
     clay stb SDL3::SDL3 SDL3_ttf::SDL3_ttf
-    capture hotkey geometry naming config
-    "-framework Carbon" "-framework Cocoa")
+    core
+    "-framework Cocoa")
