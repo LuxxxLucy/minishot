@@ -11,6 +11,7 @@
 #include "geometry.h"
 #include "hotkey.h"
 #include "overlay.h"
+#include "util.h"
 #include "view.h"
 #include "settings.h"
 
@@ -31,9 +32,8 @@ static void ms_log_output(void *ud, int category, SDL_LogPriority pri,
     fprintf(stderr, "%s\n", msg);
 }
 
-static void ms_log_init(void)
+static void ms_log_init(const char *path)
 {
-    const char *path = MS_LOG_PATH;
     g_log_file = fopen(path, "w");
     SDL_SetLogOutputFunction(ms_log_output, NULL);
     SDL_SetLogPriorities(SDL_LOG_PRIORITY_VERBOSE);
@@ -140,7 +140,7 @@ static SDL_Tray *make_tray(void)
 // finishes or cancels.
 // ----------------------------------------------------------------------------
 
-static void ms_run_capture_flow(void)
+static void ms_run_capture_flow(const char *temp_dir)
 {
     SDL_Log("capture flow: begin");
     struct ms_overlay_result sel = ms_overlay_run();
@@ -159,9 +159,14 @@ static void ms_run_capture_flow(void)
         return;
     }
 
-    char tmp_png[1024];
-    SDL_snprintf(tmp_png, sizeof(tmp_png), MS_TMP_CAPTURE_FMT,
+    char name[64];
+    SDL_snprintf(name, sizeof(name), MS_TMP_CAPTURE_NAME_FMT,
                  (unsigned long long)SDL_GetTicksNS());
+    char tmp_png[1024];
+    if (ms_join_path(tmp_png, sizeof(tmp_png), temp_dir, name) < 0) {
+        SDL_Log("temp path too long; aborting");
+        return;
+    }
 
     int rc = ms_capture_run(x, y, w, h, tmp_png);
     SDL_Log("capture: rc=%d path=%s", rc, tmp_png);
@@ -217,7 +222,10 @@ int main(void)
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
     }
-    ms_log_init();
+
+    struct ms_config cfg;
+    ms_config_load(&cfg);
+    ms_log_init(cfg.log_path);
 
     // Borderless overlay/menu windows must take the focusing click as a real
     // event and become key on show, so the first press-drag draws a selection
@@ -231,9 +239,6 @@ int main(void)
         g_capture_event = 0;
     }
 
-    struct ms_config cfg;
-    ms_config_load(&cfg);
-
     // Shared Clay arena + context for the app (tray/action menus create their
     // own contexts; this one anchors text measurement / a default context).
     uint64_t mem = Clay_MinMemorySize();
@@ -242,17 +247,20 @@ int main(void)
     Clay_Initialize(arena, (Clay_Dimensions){ 1.0f, 1.0f },
                     (Clay_ErrorHandler){ handle_clay_errors, NULL });
 
-    // UI font from config, falling back to the bundled default if a configured
-    // font fails to load.
-    if (cfg.font_path[0] &&
-        ms_render_init_font(cfg.font_path, MS_UI_FONT_SIZE) != 0) {
-        SDL_Log("font '%s' failed; falling back to %s", cfg.font_path,
-                MS_UI_FONT_PATH);
-        cfg.font_path[0] = '\0';
-    }
-    if (!cfg.font_path[0] &&
-        ms_render_init_font(MS_UI_FONT_PATH, MS_UI_FONT_SIZE) != 0) {
-        SDL_Log("font init failed (%s); text will not render", MS_UI_FONT_PATH);
+    // UI font from config (font_dir + font_name), falling back to the default
+    // font if the configured one fails to load.
+    char font[2048];
+    ms_join_path(font, sizeof(font), cfg.font_dir, cfg.font_name);
+    if (ms_render_init_font(font, MS_UI_FONT_SIZE) != 0) {
+        char deflt[2048];
+        ms_join_path(deflt, sizeof(deflt), MS_CONFIG_DEFAULT_FONT_DIR,
+                     MS_CONFIG_DEFAULT_FONT_NAME);
+        if (SDL_strcmp(font, deflt) != 0 &&
+            ms_render_init_font(deflt, MS_UI_FONT_SIZE) == 0) {
+            SDL_Log("font '%s' failed; using default %s", font, deflt);
+        } else {
+            SDL_Log("font init failed (%s); text will not render", font);
+        }
     }
     Clay_SetMeasureTextFunction(ms_render_measure_text, NULL);
 
@@ -284,7 +292,7 @@ int main(void)
             if (ev.type == SDL_EVENT_QUIT) {
                 running = false;
             } else if (g_capture_event != 0 && ev.type == g_capture_event) {
-                ms_run_capture_flow();
+                ms_run_capture_flow(cfg.temp_dir);
             }
             // View events are routed by view's own SDL_AddEventWatch.
         }

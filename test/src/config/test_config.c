@@ -7,23 +7,28 @@ static void test_defaults(void)
     struct ms_config cfg = ms_config_default();
     CHECK_STR(cfg.save_dir, "~/Downloads");
     CHECK_STR(cfg.hotkey, "cmd+shift+a");
-    CHECK_STR(cfg.font_path, "");  // empty means use the app default
+    CHECK_STR(cfg.font_dir, "/System/Library/Fonts");
+    CHECK_STR(cfg.font_name, "SFNS.ttf");
+    CHECK_STR(cfg.log_path, "/tmp/minishot.log");
+    CHECK_STR(cfg.temp_dir, "/tmp");
 }
 
-static void test_font_path(void)
+static void test_font_fields(void)
 {
     struct ms_config cfg = ms_config_default();
-    int rc = ms_config_parse(&cfg, "font_path=/Library/Fonts/My.ttf\n");
+    int rc = ms_config_parse(&cfg, "font_dir=/Library/Fonts\nfont_name=My.ttf\n");
     CHECK_EQ(rc, 0);
-    CHECK_STR(cfg.font_path, "/Library/Fonts/My.ttf");
+    CHECK_STR(cfg.font_dir, "/Library/Fonts");
+    CHECK_STR(cfg.font_name, "My.ttf");
 
-    // Set font_path appears in the serialized form and round-trips.
+    // The font fields appear in the serialized form and round-trip.
     char out[256];
     int n = ms_config_serialize(&cfg, out, sizeof(out));
     CHECK(n > 0);
     struct ms_config fresh = ms_config_default();
     CHECK_EQ(ms_config_parse(&fresh, out), 0);
-    CHECK_STR(fresh.font_path, "/Library/Fonts/My.ttf");
+    CHECK_STR(fresh.font_dir, "/Library/Fonts");
+    CHECK_STR(fresh.font_name, "My.ttf");
 }
 
 static void test_normal_parse(void)
@@ -110,8 +115,15 @@ static void test_serialize_exact(void)
     strcpy(cfg.hotkey, "cmd+y");
     char out[256];
     int n = ms_config_serialize(&cfg, out, sizeof(out));
-    CHECK_STR(out, "save_dir=/foo\nhotkey=cmd+y\n");
-    CHECK_EQ(n, (int)strlen("save_dir=/foo\nhotkey=cmd+y\n"));
+    const char *want =
+        "save_dir=/foo\n"
+        "hotkey=cmd+y\n"
+        "font_dir=/System/Library/Fonts\n"
+        "font_name=SFNS.ttf\n"
+        "log_path=/tmp/minishot.log\n"
+        "temp_dir=/tmp\n";
+    CHECK_STR(out, want);
+    CHECK_EQ(n, (int)strlen(want));
 }
 
 static void test_serialize_buffer_too_small(void)
@@ -141,7 +153,7 @@ static void test_round_trip(void)
 int main(void)
 {
     test_defaults();
-    test_font_path();
+    test_font_fields();
     test_normal_parse();
     test_missing_trailing_newline();
     test_whitespace_trimming();
