@@ -7,16 +7,16 @@
 static int mod_bit(const char *tok, size_t len)
 {
     if (len == 3 && strncmp(tok, "cmd", 3) == 0) {
-        return MINISHOT_MOD_CMD;
+        return MINISHOT_HOTKEY_MODIFIER_CMD;
     }
     if (len == 5 && strncmp(tok, "shift", 5) == 0) {
-        return MINISHOT_MOD_SHIFT;
+        return MINISHOT_HOTKEY_MODIFIER_SHIFT;
     }
     if (len == 3 && strncmp(tok, "alt", 3) == 0) {
-        return MINISHOT_MOD_ALT;
+        return MINISHOT_HOTKEY_MODIFIER_ALT;
     }
     if (len == 4 && strncmp(tok, "ctrl", 4) == 0) {
-        return MINISHOT_MOD_CTRL;
+        return MINISHOT_HOTKEY_MODIFIER_CTRL;
     }
     return 0;
 }
@@ -168,16 +168,16 @@ int ms_hotkey_register(struct ms_hotkey hk, void (*cb)(void *ud), void *ud)
     }
 
     UInt32 mods = 0;
-    if (hk.mods & MINISHOT_MOD_CMD) {
+    if (hk.mods & MINISHOT_HOTKEY_MODIFIER_CMD) {
         mods |= cmdKey;
     }
-    if (hk.mods & MINISHOT_MOD_SHIFT) {
+    if (hk.mods & MINISHOT_HOTKEY_MODIFIER_SHIFT) {
         mods |= shiftKey;
     }
-    if (hk.mods & MINISHOT_MOD_ALT) {
+    if (hk.mods & MINISHOT_HOTKEY_MODIFIER_ALT) {
         mods |= optionKey;
     }
-    if (hk.mods & MINISHOT_MOD_CTRL) {
+    if (hk.mods & MINISHOT_HOTKEY_MODIFIER_CTRL) {
         mods |= controlKey;
     }
 
