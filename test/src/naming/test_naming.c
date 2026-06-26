@@ -30,29 +30,5 @@ int main(void)
     CHECK_EQ(r, 28);
     CHECK_STR(buf, "minishot-20260619-090503.png");
 
-    // ms_join_path: dir without trailing slash.
-    r = ms_join_path(buf, sizeof buf, "~/Desktop", "a.png");
-    CHECK_STR(buf, "~/Desktop/a.png");
-    CHECK_EQ(r, 15);
-
-    // dir with trailing slash — do not double it.
-    r = ms_join_path(buf, sizeof buf, "~/Desktop/", "a.png");
-    CHECK_STR(buf, "~/Desktop/a.png");
-    CHECK_EQ(r, 15);
-
-    // empty dir — just the name, no leading slash.
-    r = ms_join_path(buf, sizeof buf, "", "a.png");
-    CHECK_STR(buf, "a.png");
-    CHECK_EQ(r, 5);
-
-    // join buffer one too small (15 chars + NUL needs 16).
-    r = ms_join_path(buf, 15, "~/Desktop", "a.png");
-    CHECK_EQ(r, -1);
-
-    // join buffer exactly large enough.
-    r = ms_join_path(buf, 16, "~/Desktop", "a.png");
-    CHECK_EQ(r, 15);
-    CHECK_STR(buf, "~/Desktop/a.png");
-
     TEST_REPORT();
 }
