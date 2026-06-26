@@ -383,13 +383,8 @@ static void ms_view_do_save(struct ms_view *v)
     struct ms_config cfg;
     ms_config_load(&cfg);
 
-    const char *home = SDL_getenv("HOME");
     char dir[1024];
-    if (cfg.save_dir[0] == '~' && home) {
-        SDL_snprintf(dir, sizeof(dir), "%s%s", home, cfg.save_dir + 1);
-    } else {
-        SDL_strlcpy(dir, cfg.save_dir, sizeof(dir));
-    }
+    ms_expand_path_from_home(dir, sizeof(dir), cfg.save_dir, SDL_getenv("HOME"));
 
     time_t t = time(NULL);
     struct tm lt;
