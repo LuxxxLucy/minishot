@@ -213,6 +213,27 @@ static int ms_init_icon_font(void)
     return ms_render_init_icon_font(p);
 }
 
+// UI font from config (font_dir + font_name), falling back to the bundled
+// default if the configured font fails to load.
+static int ms_init_ui_font(const struct ms_config *cfg)
+{
+    char font[2048];
+    ms_join_path(font, sizeof(font), cfg->font_dir, cfg->font_name);
+    if (ms_render_init_font(font, MS_UI_FONT_SIZE) == 0) {
+        return 0;
+    }
+    char deflt[2048];
+    ms_join_path(deflt, sizeof(deflt), MS_CONFIG_DEFAULT_FONT_DIR,
+                 MS_CONFIG_DEFAULT_FONT_NAME);
+    if (SDL_strcmp(font, deflt) != 0 &&
+        ms_render_init_font(deflt, MS_UI_FONT_SIZE) == 0) {
+        SDL_Log("font '%s' failed; using default %s", font, deflt);
+        return 0;
+    }
+    SDL_Log("font init failed (%s); text will not render", font);
+    return -1;
+}
+
 int main(void)
 {
     // hint SDL to not show the app in the Dock, but rather as a background app
@@ -247,21 +268,7 @@ int main(void)
     Clay_Initialize(arena, (Clay_Dimensions){ 1.0f, 1.0f },
                     (Clay_ErrorHandler){ handle_clay_errors, NULL });
 
-    // UI font from config (font_dir + font_name), falling back to the default
-    // font if the configured one fails to load.
-    char font[2048];
-    ms_join_path(font, sizeof(font), cfg.font_dir, cfg.font_name);
-    if (ms_render_init_font(font, MS_UI_FONT_SIZE) != 0) {
-        char deflt[2048];
-        ms_join_path(deflt, sizeof(deflt), MS_CONFIG_DEFAULT_FONT_DIR,
-                     MS_CONFIG_DEFAULT_FONT_NAME);
-        if (SDL_strcmp(font, deflt) != 0 &&
-            ms_render_init_font(deflt, MS_UI_FONT_SIZE) == 0) {
-            SDL_Log("font '%s' failed; using default %s", font, deflt);
-        } else {
-            SDL_Log("font init failed (%s); text will not render", font);
-        }
-    }
+    ms_init_ui_font(&cfg);
     Clay_SetMeasureTextFunction(ms_render_measure_text, NULL);
 
     if (ms_init_icon_font() != 0) {
