@@ -12,7 +12,7 @@
 // IO, so the load/save against $HOME/MS_CONFIG_FILE live in the app layer.
 #define MS_SETTINGS_FONT_ID 0
 #define MS_SETTINGS_WIN_W 460
-#define MS_SETTINGS_WIN_H 290
+#define MS_SETTINGS_WIN_H 320
 #define MS_SETTINGS_FONT_TITLE 20
 #define MS_SETTINGS_FONT_LABEL 14
 #define MS_SETTINGS_FONT_BODY 15
@@ -291,6 +291,13 @@ void ms_settings_open(void)
         SDL_Log("settings: window/renderer failed: %s", SDL_GetError());
         goto out;
     }
+
+    // Pop above the foreground app; we run as a background app so the window
+    // would otherwise open behind whatever is focused.
+    SDL_ShowWindow(win);
+    SDL_SetWindowAlwaysOnTop(win, true);
+    SDL_RaiseWindow(win);
+    SDL_SetWindowAlwaysOnTop(win, false);
 
     // Draw the point-based layout into a high-DPI backbuffer: logical
     // presentation maps points to device pixels, and the render layer
